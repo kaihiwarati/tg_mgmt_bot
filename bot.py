@@ -2,7 +2,7 @@
 Telegram Management Bot — Aesthetic UI Edition
 Telethon + SQLite + nekos.best
 
-Part 1 of 2 — paste both parts into bot.py before running.
+Made For My Love
 """
 
 import asyncio
@@ -37,8 +37,8 @@ LOG_CHANNEL_ID = int(LOG_CHANNEL) if LOG_CHANNEL.lstrip("-").isdigit() else None
 STARTUP_NOTIFY = os.getenv("STARTUP_NOTIFY", "").strip()
 DEBUG = os.getenv("DEBUG", "false").lower() in ("1", "true", "yes", "on")
 
-DATA_DIR = Path("data")
-DATA_DIR.mkdir(exist_ok=True)
+DATA_DIR = Path(os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 ASSETS_DIR = Path("assets")
 ASSETS_DIR.mkdir(exist_ok=True)
 DB_PATH = DATA_DIR / "bot.db"
