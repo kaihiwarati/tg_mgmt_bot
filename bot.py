@@ -362,6 +362,7 @@ async def resolve_target(event):
 NEKOS_BASE = "https://nekos.best/api/v2"
 
 NEKOS_MAP = {
+    "angry": "baka",
     "pat": "pat", "slap": "slap", "bonk": "bonk", "tickle": "tickle",
     "cry": "cry", "highfive": "highfive", "murder": "punch",
     "smug": "smug", "blush": "blush", "smile": "smile",
@@ -555,7 +556,7 @@ HELP_PAGES = {
         "        /tickle /cry /smug",
         "        /blush /smile /wave",
         "        /wink /pout /shy",
-        "        /happy /laugh",
+        "        /angry /happy /laugh",
         "        /facepalm /highfive",
         "        /murder",
     ]),
@@ -982,7 +983,7 @@ async def cmd_filters(event):
     rows = cur.fetchall()
     if not rows:
         return await event.reply(error("No filters set"))
-    items = [f"`{r['keyword']}` ({r['media_type'] or 'text'})" for r in rows]
+    items = [f"`{r['keyword']}`" for r in rows]
     await event.reply(list_panel("🔎", "Filters", items))
 
 
@@ -1719,6 +1720,7 @@ async def cmd_direct_custom(event):
 # ═══════════════════════════════════════════════════════════
 
 NEKOS_FUN = {
+    "angry": "is angry at",
     "pat": "pats",
     "slap": "slaps",
     "bonk": "bonks",
@@ -2104,7 +2106,7 @@ async def message_handler(event):
     if not msg or msg.startswith("/"):
         return
 
-    # ── 1. Filters ──
+        # ── 1. Filters ──
     try:
         text_lower = msg.lower()
         cur.execute(
@@ -2113,8 +2115,17 @@ async def message_handler(event):
         )
         rows = cur.fetchall()
         for row in rows:
-            match = re.search(rf"\b{re.escape(row['keyword'])}\b", text_lower)
-            if match:
+            kw = row["keyword"]
+
+            # Smart matching
+            if re.search(r"[^\w\s]", kw):
+                # Contains symbols (@, #, ., etc.) → substring match
+                matched = kw in text_lower
+            else:
+                # Pure word → word-boundary match
+                matched = bool(re.search(rf"\b{re.escape(kw)}\b", text_lower))
+
+            if matched:
                 caption = row["text"] or ""
                 fid = row["file_id"]
 
