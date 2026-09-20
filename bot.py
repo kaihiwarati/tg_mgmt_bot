@@ -1384,31 +1384,26 @@ async def cmd_purge(event):
     n_arg = event.pattern_match.group(1)
     ids: list[int] = []
 
-    if n_arg:
-        # /purge 50 → delete last 50 messages
-        n = min(int(n_arg), 200)
-        async for m in client.iter_messages(chat_id, limit=n):
-            ids.append(m.id)
-        # Also include the command message itself
-        ids.append(event.message.id)
-
-    elif event.is_reply:
-        # /purge (as reply) → delete from replied message to NOW
+    if event.is_reply:
+        # Reply-based purge — use message IDs directly (no history fetch)
         reply = await event.get_reply_message()
 
-        # Fetch messages NEWER than the reply (higher IDs = newer)
-        # Get the latest message ID first
-        latest = await client.get_messages(chat_id, limit=1)
-        max_id = latest[0].id if latest else reply.id + 500
+        # Deleted from reply to command message
+        start = reply.id
+        end = event.message.id
 
-        # Iterate from newest to oldest, stopping at reply
-        async for m in client.iter_messages(chat_id, max_id=max_id + 1, min_id=reply.id - 1, limit=500):
-            ids.append(m.id)
+        if end <= start:
+            return await event.reply(error("Can't purge — reply is newer than command"))
 
-        # Include the reply itself
-        ids.append(reply.id)
-        # Include the command message
-        ids.append(event.message.id)
+        # Build ID range (supergroup IDs are sequential)
+        ids = list(range(start, end + 1))
+
+    elif n_arg:
+        # /purge 50 — delete last N by counting backwards from command
+        n = min(int(n_arg), 100)
+        end = event.message.id
+        start = max(1, end - n)
+        ids = list(range(start, end + 1))
 
     else:
         return await event.reply(error("Usage", "Reply to a message or use `/purge 50`"))
@@ -1416,20 +1411,15 @@ async def cmd_purge(event):
     if not ids:
         return await event.reply(error("Nothing to purge"))
 
-    # Deduplicate + sort descending (newest first)
-    ids = sorted(set(ids), reverse=True)
-
+    # Delete in chunks of 100
     deleted = 0
     failed = 0
-
-    # Delete in chunks of 100
     for i in range(0, len(ids), 100):
         chunk = ids[i:i+100]
         try:
             await client.delete_messages(chat_id, chunk)
             deleted += len(chunk)
         except Exception:
-            # Fallback: delete one by one
             for mid in chunk:
                 try:
                     await client.delete_messages(chat_id, mid)
@@ -1439,13 +1429,14 @@ async def cmd_purge(event):
 
     notice = await event.reply(
         success(f"Purged {deleted} messages")
-        + (f"\n\n  {BULLET} Failed: {failed} (older than 48h?)" if failed else "")
+        + (f"\n\n  {BULLET} Failed: {failed} (older than 48h or not deletable)" if failed else "")
     )
     await asyncio.sleep(3)
     try:
         await notice.delete()
     except Exception:
         pass
+
 
 # ═══════════════════════════════════════════════════════════
 # GREETINGS — welcome + goodbye with photo/GIF/video
@@ -2078,9 +2069,8 @@ async def cmd_crush(event):
         bar = "💘"
 
     caption = (
-        f"💘 **Crush**\n\n"
-        f"  {BULLET} {mention(sender.id, sender.first_name)} → {mention(uid, name)}\n"
-        f"  {BULLET} Crush level: {pct}%\n"
+        f"💘 **{sender.first_name}'s secret crush is {name}**\n\n"
+        f"  {BULLET} Bond: {pct}%\n"
         f"  {BULLET} {bar}"
     )
     if not await send_media_reply(event, "crush", caption):
