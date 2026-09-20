@@ -555,7 +555,7 @@ HELP_PAGES = {
         "Consent: /hug /kiss /sex",
         "         /dance /cuddle",
         "Direct: /bite /lick /kill",
-        "        /punch /spank /shy",
+        "        /punch /spank ",
         "Nekos: /sad /angry /pat",
         "       /slap /bonk /tickle",
         "       /cry /smug /blush",
@@ -1872,6 +1872,41 @@ async def cmd_direct_custom(event):
         caption = f"{icon} **{sender.first_name}** {with_target_verb} **{target}** {icon}"
     else:
         caption = f"{icon} **{sender.first_name}** {no_target_verb} {icon}"
+
+    if not await send_media_reply(event, action, caption):
+        await event.reply(caption)
+
+
+# ═══════════════════════════════════════════════════════════
+# SELF-ONLY FUN — shy (custom assets)
+# ═══════════════════════════════════════════════════════════
+
+SELF_ACTIONS = {
+    "shy": "is shy",
+}
+
+
+@client.on(events.NewMessage(pattern=rf"^/({'|'.join(SELF_ACTIONS)})(?:@\w+)?$"))
+async def cmd_self_fun(event):
+    action = event.pattern_match.group(1).lower()
+    verb = SELF_ACTIONS.get(action, action)
+    sender = await event.get_sender()
+
+    target = ""
+    target_id = 0
+    if event.is_reply:
+        msg = await event.get_reply_message()
+        try:
+            u = await client.get_entity(msg.sender_id)
+            target = u.first_name
+            target_id = u.id
+        except Exception:
+            pass
+
+    if target:
+        caption = f"✨ {mention(sender.id, sender.first_name)} {verb} around {mention(target_id, target)} ✨"
+    else:
+        caption = f"✨ {mention(sender.id, sender.first_name)} {verb} ✨"
 
     if not await send_media_reply(event, action, caption):
         await event.reply(caption)
