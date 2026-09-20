@@ -53,7 +53,7 @@ PERMISSION_TIMEOUT = 60
 CONSENT_ACTIONS = {"hug", "kiss", "sex","dance","cuddle"}
 
 # Custom assets-only categories (no nekos)
-CUSTOM_ONLY = {"hug", "kiss", "sex", "dance", "bite", "lick", "cuddle","kill","punch"."spank","shy"}
+CUSTOM_ONLY = {"hug", "kiss", "sex", "dance", "bite", "lick", "cuddle","kill","punch","spank","shy"}
 
 
 def log(*args):
