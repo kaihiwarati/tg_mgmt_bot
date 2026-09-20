@@ -50,10 +50,10 @@ START_TIME = time.time()
 PERMISSION_TIMEOUT = 60
 
 # Consent actions — ask target first
-CONSENT_ACTIONS = {"hug", "kiss", "sex","dance"}
+CONSENT_ACTIONS = {"hug", "kiss", "sex","dance","cuddle"}
 
 # Custom assets-only categories (no nekos)
-CUSTOM_ONLY = {"hug", "kiss", "sex", "dance", "bite", "lick", "cuddle","kill","punch"}
+CUSTOM_ONLY = {"hug", "kiss", "sex", "dance", "bite", "lick", "cuddle","kill","punch"."spank","shy"}
 
 
 def log(*args):
@@ -363,10 +363,11 @@ NEKOS_BASE = "https://nekos.best/api/v2"
 
 NEKOS_MAP = {
     "angry": "baka",
+    "sad": "cry",
     "pat": "pat", "slap": "slap", "bonk": "bonk", "tickle": "tickle",
     "cry": "cry", "highfive": "highfive", "murder": "punch",
     "smug": "smug", "blush": "blush", "smile": "smile",
-    "wave": "wave", "wink": "wink", "pout": "pout", "shy": "shy",
+    "wave": "wave", "wink": "wink", "pout": "pout",
     "happy": "happy", "laugh": "laugh", "facepalm": "facepalm",
     "afk": "sleep", "brb": "wave", "wish": "dance",
     "couple": "cuddle", "waifu": "waifu",
@@ -533,6 +534,8 @@ HELP_PAGES = {
         "/lock <type> — Lock type",
         "/lockall — Lock all",
         "/unlockall — Unlock all",
+        "/lock_media — Lock media only",
+        "/unlock_media — Unlock media",
         "/locks — List locks",
     ]),
     7: ("⚠️ Warn & Tag", [
@@ -550,19 +553,23 @@ HELP_PAGES = {
     ]),
     9: ("🎲 Fun", [
         "Consent: /hug /kiss /sex",
-        "Direct: /dance /bite /lick",
-        "         /cuddle /kill",
-        "Nekos: /pat /slap /bonk",
-        "        /tickle /cry /smug",
-        "        /blush /smile /wave",
-        "        /wink /pout /shy",
-        "        /angry /happy /laugh",
-        "        /facepalm /highfive",
-        "        /murder",
+        "         /dance /cuddle",
+        "Direct: /bite /lick /kill",
+        "        /punch /spank /shy",
+        "Nekos: /sad /angry /pat",
+        "       /slap /bonk /tickle",
+        "       /cry /smug /blush",
+        "       /smile /wave /wink",
+        "       /pout /happy /laugh",
+        "       /facepalm /highfive",
+        "       /murder",
     ]),
     10: ("💑 Social & AFK", [
         "/couple — Random pair",
         "/waifu — Today's waifu",
+        "/love — Love bond %",
+        "/crush — Crush level %",
+        "/iq — Random IQ",
         "/wish <text> — Make a wish",
         "/afk [reason] — Set AFK",
         "/brb [note] — Be right back",
@@ -957,6 +964,51 @@ async def cmd_unban(event):
     except Exception as e:
         await event.reply(error("Failed", str(e)))
 
+@client.on(events.NewMessage(pattern=r"^/unmute(?:@\w+)?(?:\s+(.+))?$"))
+async def cmd_unmute(event):
+    """Remove mute (send_messages restriction), but keep ban restrictions intact."""
+    if not await require_admin(event):
+        return
+    chat_id = event.chat_id
+    uid, name = await resolve_target(event)
+    if not uid:
+        return await event.reply(error("Usage", "`/unmute @username` or reply"))
+
+    try:
+        # Get current banned rights and only lift send_messages
+        from telethon.tl.functions.channels import GetParticipantRequest
+        try:
+            participant = await client(GetParticipantRequest(chat_id, uid))
+            current = participant.participant
+        except Exception:
+            current = None
+
+        # Simpler approach: just reset send_messages to False, keep others as-is
+        # Fetch current state via get_permissions
+        perms = await client.get_permissions(chat_id, uid)
+
+        # Build new rights — remove mute only
+        # Keep view_messages restriction if banned (view_messages=True means banned)
+        view_banned = not perms.is_admin and not getattr(perms, "view_messages", True)
+
+        rights = ChatBannedRights(
+            until_date=0,
+            view_messages=view_banned,  # keep ban if user was banned
+            send_messages=False,         # unmute
+            send_media=False,
+            send_stickers=False,
+            send_gifs=False,
+            send_games=False,
+            send_inline=False,
+            embed_links=False,
+        )
+        await client(EditBannedRequest(chat_id, uid, rights))
+        await log_action("Unmute", await event.get_sender(), name)
+        sender = await event.get_sender()
+        await event.reply(action_line("🔊", sender.first_name, "unmuted", name))
+    except Exception as e:
+        await event.reply(error("Failed", str(e)))
+
 
 @client.on(events.CallbackQuery(data=re.compile(rb"^unban:(\d+)$")))
 async def cb_unban(event):
@@ -1105,25 +1157,96 @@ async def cmd_lock(event):
 
 @client.on(events.NewMessage(pattern=r"^/lockall(?:@\w+)?$"))
 async def cmd_lockall(event):
+    """Lock the entire chat — only admins can send messages."""
     if not await require_admin(event):
         return
     chat_id = event.chat_id
-    for t in LOCK_TYPES:
-        cur.execute("INSERT OR IGNORE INTO locks VALUES(?,?)", (chat_id, t))
-    conn.commit()
-    await _apply_locks(chat_id)
-    await event.reply(success(f"All {len(LOCK_TYPES)} locks enabled"))
+    try:
+        rights = ChatBannedRights(
+            until_date=0,
+            send_messages=True,
+            send_media=True,
+            send_stickers=True,
+            send_gifs=True,
+            send_games=True,
+            send_inline=True,
+            embed_links=True,
+            send_polls=True,
+        )
+        await client(EditChatDefaultBannedRightsRequest(chat_id, rights))
+        await event.reply(success("Chat locked", [("Note", "Only admins can send messages")]))
+    except Exception as e:
+        await event.reply(error("Failed", str(e)))
 
 
 @client.on(events.NewMessage(pattern=r"^/unlockall(?:@\w+)?$"))
 async def cmd_unlockall(event):
+    """Fully unlock the chat — everyone can send anything."""
     if not await require_admin(event):
         return
     chat_id = event.chat_id
-    cur.execute("DELETE FROM locks WHERE chat_id=?", (chat_id,))
-    conn.commit()
-    await client(EditChatDefaultBannedRightsRequest(chat_id, ChatBannedRights(until_date=0)))
-    await event.reply(success("All locks removed"))
+    try:
+        # Clear any stored lock flags in DB
+        cur.execute("DELETE FROM locks WHERE chat_id=?", (chat_id,))
+        conn.commit()
+        # Reset all restrictions
+        await client(EditChatDefaultBannedRightsRequest(chat_id, ChatBannedRights(until_date=0)))
+        await event.reply(success("Chat unlocked"))
+    except Exception as e:
+        await event.reply(error("Failed", str(e)))
+
+@client.on(events.NewMessage(pattern=r"^/lock_media(?:@\w+)?$"))
+async def cmd_lock_media(event):
+    """Lock only media — text still allowed."""
+    if not await require_admin(event):
+        return
+    chat_id = event.chat_id
+    try:
+        # Preserve current lock state — only add media restriction
+        cur.execute("SELECT lock_type FROM locks WHERE chat_id=?", (chat_id,))
+        existing = {r["lock_type"] for r in cur.fetchall()}
+        existing.add("media")
+
+        kwargs = {}
+        for t in existing:
+            kwargs.update(LOCK_TYPES.get(t, {}))
+        # Ensure only media-related restrictions, keep other stored types
+        kwargs["send_media"] = True
+        kwargs["send_stickers"] = True
+        kwargs["send_gifs"] = True
+
+        rights = ChatBannedRights(until_date=0, **kwargs)
+        await client(EditChatDefaultBannedRightsRequest(chat_id, rights))
+
+        cur.execute("INSERT OR IGNORE INTO locks VALUES(?,?)", (chat_id, "media"))
+        conn.commit()
+        await event.reply(success("Media locked", [("Note", "Text still allowed")]))
+    except Exception as e:
+        await event.reply(error("Failed", str(e)))
+
+
+@client.on(events.NewMessage(pattern=r"^/unlock_media(?:@\w+)?$"))
+async def cmd_unlock_media(event):
+    """Unlock media only."""
+    if not await require_admin(event):
+        return
+    chat_id = event.chat_id
+    try:
+        cur.execute("DELETE FROM locks WHERE chat_id=? AND lock_type IN ('media','stickers','gifs')",
+                    (chat_id,))
+        conn.commit()
+
+        cur.execute("SELECT lock_type FROM locks WHERE chat_id=?", (chat_id,))
+        remaining = {r["lock_type"] for r in cur.fetchall()}
+        kwargs = {}
+        for t in remaining:
+            kwargs.update(LOCK_TYPES.get(t, {}))
+
+        rights = ChatBannedRights(until_date=0, **kwargs)
+        await client(EditChatDefaultBannedRightsRequest(chat_id, rights))
+        await event.reply(success("Media unlocked"))
+    except Exception as e:
+        await event.reply(error("Failed", str(e)))
 
 
 @client.on(events.NewMessage(pattern=r"^/locks(?:@\w+)?$"))
@@ -1262,42 +1385,67 @@ async def cmd_purge(event):
     ids: list[int] = []
 
     if n_arg:
+        # /purge 50 → delete last 50 messages
         n = min(int(n_arg), 200)
         async for m in client.iter_messages(chat_id, limit=n):
             ids.append(m.id)
+        # Also include the command message itself
+        ids.append(event.message.id)
+
     elif event.is_reply:
+        # /purge (as reply) → delete from replied message to NOW
         reply = await event.get_reply_message()
-        async for m in client.iter_messages(chat_id, min_id=reply.id - 1, reverse=False, limit=200):
+
+        # Fetch messages NEWER than the reply (higher IDs = newer)
+        # Get the latest message ID first
+        latest = await client.get_messages(chat_id, limit=1)
+        max_id = latest[0].id if latest else reply.id + 500
+
+        # Iterate from newest to oldest, stopping at reply
+        async for m in client.iter_messages(chat_id, max_id=max_id + 1, min_id=reply.id - 1, limit=500):
             ids.append(m.id)
+
+        # Include the reply itself
+        ids.append(reply.id)
+        # Include the command message
+        ids.append(event.message.id)
+
     else:
         return await event.reply(error("Usage", "Reply to a message or use `/purge 50`"))
 
     if not ids:
         return await event.reply(error("Nothing to purge"))
 
+    # Deduplicate + sort descending (newest first)
+    ids = sorted(set(ids), reverse=True)
+
     deleted = 0
+    failed = 0
+
+    # Delete in chunks of 100
     for i in range(0, len(ids), 100):
         chunk = ids[i:i+100]
         try:
             await client.delete_messages(chat_id, chunk)
             deleted += len(chunk)
         except Exception:
+            # Fallback: delete one by one
             for mid in chunk:
                 try:
                     await client.delete_messages(chat_id, mid)
                     deleted += 1
                 except Exception:
-                    pass
+                    failed += 1
 
-    notice = await event.reply(success(f"Purged {deleted} messages"))
+    notice = await event.reply(
+        success(f"Purged {deleted} messages")
+        + (f"\n\n  {BULLET} Failed: {failed} (older than 48h?)" if failed else "")
+    )
     await asyncio.sleep(3)
     try:
         await notice.delete()
     except Exception:
         pass
-
-
-# ==================== END OF PART 1 ====================
 
 # ═══════════════════════════════════════════════════════════
 # GREETINGS — welcome + goodbye with photo/GIF/video
@@ -1501,8 +1649,12 @@ async def on_chat_action(event):
 # AFK / BRB
 # ═══════════════════════════════════════════════════════════
 
-@client.on(events.NewMessage(pattern=r"^/afk(?:@\w+)?(?:\s+(.+))?$"))
+@client.on(events.NewMessage(pattern=r"^/?afk(?:@\w+)?(?:\s+(.+))?$", func=lambda e: e.is_group))
 async def cmd_afk(event):
+    # Slash-less trigger safety: only fire if the message starts with "afk"
+    msg = event.message.message or ""
+    if not msg.lower().startswith("afk"):
+        return
     reason = (event.pattern_match.group(1) or "AFK").strip()
     cur.execute("INSERT OR REPLACE INTO afk VALUES(?,?,?)",
                 (event.sender_id, reason, time.time()))
@@ -1516,8 +1668,11 @@ async def cmd_afk(event):
         await event.reply(caption)
 
 
-@client.on(events.NewMessage(pattern=r"^/brb(?:@\w+)?(?:\s+(.+))?$"))
+@client.on(events.NewMessage(pattern=r"^/?brb(?:@\w+)?(?:\s+(.+))?$", func=lambda e: e.is_group))
 async def cmd_brb(event):
+    msg = event.message.message or ""
+    if not msg.lower().startswith("brb"):
+        return
     reason = (event.pattern_match.group(1) or "BRB").strip()
     cur.execute("INSERT OR REPLACE INTO afk VALUES(?,?,?)",
                 (event.sender_id, reason, time.time()))
@@ -1661,9 +1816,9 @@ async def cmd_consent(event):
 DIRECT_CUSTOM_VERBS = {
     "bite": ("bites", "bites"),
     "lick": ("licks", "licks"),
-    "cuddle": ("cuddles", "cuddles"),
     "kill": ("kills", "kills"),
     "punch": ("punches", "punches"),
+    "spank": ("spanks","spanks")
 }
 
 
@@ -1704,7 +1859,14 @@ async def cmd_direct_custom(event):
                 except Exception:
                     pass
 
-    icon = "⚔️" if action == "kill" else "✨"
+    icon = {
+        "kill": "⚔️",
+        "spank": "😏",
+        "bite": "✨",
+        "lick": "✨",
+        "punch": "✨",
+    }
+    icon = icon.get(action, "✨" )
 
     if target:
         caption = f"{icon} **{sender.first_name}** {with_target_verb} **{target}** {icon}"
@@ -1732,7 +1894,7 @@ NEKOS_FUN = {
     "wave": "waves",
     "wink": "winks",
     "pout": "pouts",
-    "shy": "is shy",
+    "sad": "is sad",
     "happy": "is happy",
     "laugh": "laughs",
     "facepalm": "facepalms",
@@ -1811,6 +1973,112 @@ async def cmd_couple(event):
             await event.reply(caption)
     except Exception as e:
         await event.reply(error("Failed", str(e)))
+
+async def _pick_target_or_random(event):
+    """Return (user_id, name). Uses target if given, else random member."""
+    uid, name = await resolve_target(event)
+    if uid:
+        return uid, name
+    # Pick random member
+    try:
+        users = []
+        async for u in client.iter_participants(event.chat_id):
+            if not u.bot and not u.deleted and u.id != event.sender_id:
+                users.append(u)
+        if users:
+            u = random.choice(users)
+            return u.id, getattr(u, "first_name", str(u.id))
+    except Exception:
+        pass
+    return None, None
+
+
+@client.on(events.NewMessage(pattern=r"^/love(?:@\w+)?(?:\s+.*)?$"))
+async def cmd_love(event):
+    sender = await event.get_sender()
+    uid, name = await _pick_target_or_random(event)
+    if not uid:
+        return await event.reply(error("No target found"))
+    pct = random.randint(1, 100)
+
+    # Heart progression
+    if pct >= 80:
+        bar = "❤️❤️❤️❤️❤️"
+    elif pct >= 60:
+        bar = "❤️❤️❤️❤️"
+    elif pct >= 40:
+        bar = "❤️❤️❤️"
+    elif pct >= 20:
+        bar = "❤️❤️"
+    else:
+        bar = "❤️"
+
+    caption = (
+        f"💕 **Love**\n\n"
+        f"  {BULLET} {mention(sender.id, sender.first_name)} → {mention(uid, name)}\n"
+        f"  {BULLET} Bond: {pct}%\n"
+        f"  {BULLET} {bar}"
+    )
+    if not await send_media_reply(event, "love", caption):
+        await event.reply(caption)
+
+
+@client.on(events.NewMessage(pattern=r"^/crush(?:@\w+)?(?:\s+.*)?$"))
+async def cmd_crush(event):
+    sender = await event.get_sender()
+    uid, name = await _pick_target_or_random(event)
+    if not uid:
+        return await event.reply(error("No target found"))
+    pct = random.randint(1, 100)
+
+    if pct >= 80:
+        bar = "💘💘💘💘💘"
+    elif pct >= 60:
+        bar = "💘💘💘💘"
+    elif pct >= 40:
+        bar = "💘💘💘"
+    elif pct >= 20:
+        bar = "💘💘"
+    else:
+        bar = "💘"
+
+    caption = (
+        f"💘 **Crush**\n\n"
+        f"  {BULLET} {mention(sender.id, sender.first_name)} → {mention(uid, name)}\n"
+        f"  {BULLET} Crush level: {pct}%\n"
+        f"  {BULLET} {bar}"
+    )
+    if not await send_media_reply(event, "crush", caption):
+        await event.reply(caption)
+
+
+@client.on(events.NewMessage(pattern=r"^/iq(?:@\w+)?(?:\s+.*)?$"))
+async def cmd_iq(event):
+    uid, name = await _pick_target_or_random(event)
+    if not uid:
+        return await event.reply(error("No target found"))
+
+    iq = random.randint(60, 180)
+
+    if iq >= 150:
+        verdict = "Genius level"
+    elif iq >= 130:
+        verdict = "Very smart"
+    elif iq >= 110:
+        verdict = "Above average"
+    elif iq >= 90:
+        verdict = "Average"
+    elif iq >= 75:
+        verdict = "Below average"
+    else:
+        verdict = "Room temperature"
+
+    await event.reply(
+        f"🧠 **IQ Test**\n\n"
+        f"  {BULLET} User: {mention(uid, name)}\n"
+        f"  {BULLET} IQ: **{iq}**\n"
+        f"  {BULLET} Verdict: {verdict}"
+    )
 
 
 @client.on(events.NewMessage(pattern=r"^/waifu(?:@\w+)?$"))
