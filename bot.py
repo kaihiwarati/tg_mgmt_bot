@@ -253,6 +253,24 @@ def init_db():
         choice TEXT,
         PRIMARY KEY (msg_id, user_id)
     );
+    CREATE TABLE IF NOT EXISTS couple_daily (
+        chat_id INTEGER PRIMARY KEY,
+        user1_id INTEGER,
+        user1_name TEXT,
+        user2_id INTEGER,
+        user2_name TEXT,
+        pct INTEGER,
+        set_at REAL
+    );
+    CREATE TABLE IF NOT EXISTS waifu_daily (
+        chat_id INTEGER,
+        user_id INTEGER,
+        waifu_id INTEGER,
+        waifu_name TEXT,
+        pct INTEGER,
+        set_at REAL,
+        PRIMARY KEY (chat_id, user_id)
+    );
     """)
     conn.commit()
 
@@ -369,7 +387,7 @@ NEKOS_MAP = {
     "smug": "smug", "blush": "blush", "smile": "smile",
     "wave": "wave", "wink": "wink", "pout": "pout",
     "happy": "happy", "laugh": "laugh", "facepalm": "facepalm",
-    "afk": "sleep", "brb": "wave", "wish": "dance",
+    "afk": "sleep", "wish": "dance",
     "couple": "cuddle", "waifu": "waifu",
     "welcome": "wave", "goodbye": "wave", "start": "wave",
 }
@@ -569,10 +587,11 @@ HELP_PAGES = {
         "/waifu — Today's waifu",
         "/love — Love bond %",
         "/crush — Crush level %",
+        "/brotherhood — Bhaichara meter",
+        "/sisterhood — Behen-chara meter",
         "/iq — Random IQ",
         "/wish <text> — Make a wish",
         "/afk [reason] — Set AFK",
-        "/brb [note] — Be right back",
     ]),
     11: ("🎮 Games", [
         "/truth — Random truth question",
@@ -1202,52 +1221,71 @@ async def cmd_lock_media(event):
         return
     chat_id = event.chat_id
     try:
-        # Preserve current lock state — only add media restriction
-        cur.execute("SELECT lock_type FROM locks WHERE chat_id=?", (chat_id,))
-        existing = {r["lock_type"] for r in cur.fetchall()}
-        existing.add("media")
+        # Get current default rights to preserve other restrictions
+        try:
+            entity = await client.get_entity(chat_id)
+            current = entity.default_banned_rights if hasattr(entity, "default_banned_rights") else None
+        except Exception:
+            current = None
 
-        kwargs = {}
-        for t in existing:
-            kwargs.update(LOCK_TYPES.get(t, {}))
-        # Ensure only media-related restrictions, keep other stored types
-        kwargs["send_media"] = True
-        kwargs["send_stickers"] = True
-        kwargs["send_gifs"] = True
+        # Build new rights — only restrict media, keep others as current
+        rights = ChatBannedRights(
+            until_date=0,
+            view_messages=current.view_messages if current else False,
+            send_messages=current.send_messages if current else False,
+            send_media=True,       # lock media
+            send_stickers=True,    # lock stickers
+            send_gifs=True,        # lock gifs
+            send_games=current.send_games if current else False,
+            send_inline=current.send_inline if current else False,
+            embed_links=current.embed_links if current else False,
+            send_polls=current.send_polls if current else False,
+        )
 
-        rights = ChatBannedRights(until_date=0, **kwargs)
         await client(EditChatDefaultBannedRightsRequest(chat_id, rights))
 
+        # Save to DB so /locks reflects it
         cur.execute("INSERT OR IGNORE INTO locks VALUES(?,?)", (chat_id, "media"))
         conn.commit()
+
         await event.reply(success("Media locked", [("Note", "Text still allowed")]))
     except Exception as e:
-        await event.reply(error("Failed", str(e)))
+        await event.reply(error("Failed", f"`{e}`"))
 
 
 @client.on(events.NewMessage(pattern=r"^/unlock_media(?:@\w+)?$"))
 async def cmd_unlock_media(event):
-    """Unlock media only."""
+    """Unlock media — but keep other locks intact."""
     if not await require_admin(event):
         return
     chat_id = event.chat_id
     try:
-        cur.execute("DELETE FROM locks WHERE chat_id=? AND lock_type IN ('media','stickers','gifs')",
-                    (chat_id,))
+        # Remove media flags from DB
+        cur.execute(
+            "DELETE FROM locks WHERE chat_id=? AND lock_type IN ('media','stickers','gifs')",
+            (chat_id,)
+        )
         conn.commit()
 
+        # Rebuild default rights from remaining locks
         cur.execute("SELECT lock_type FROM locks WHERE chat_id=?", (chat_id,))
         remaining = {r["lock_type"] for r in cur.fetchall()}
-        kwargs = {}
+
+        kwargs = {
+            "until_date": 0,
+            "send_media": False,
+            "send_stickers": False,
+            "send_gifs": False,
+        }
         for t in remaining:
             kwargs.update(LOCK_TYPES.get(t, {}))
 
-        rights = ChatBannedRights(until_date=0, **kwargs)
+        rights = ChatBannedRights(**kwargs)
         await client(EditChatDefaultBannedRightsRequest(chat_id, rights))
+
         await event.reply(success("Media unlocked"))
     except Exception as e:
-        await event.reply(error("Failed", str(e)))
-
+        await event.reply(error("Failed", f"`{e}`"))
 
 @client.on(events.NewMessage(pattern=r"^/locks(?:@\w+)?$"))
 async def cmd_locks(event):
@@ -1637,14 +1675,13 @@ async def on_chat_action(event):
 
 
 # ═══════════════════════════════════════════════════════════
-# AFK / BRB
+# AFK
 # ═══════════════════════════════════════════════════════════
 
 @client.on(events.NewMessage(pattern=r"^/?afk(?:@\w+)?(?:\s+(.+))?$", func=lambda e: e.is_group))
 async def cmd_afk(event):
-    # Slash-less trigger safety: only fire if the message starts with "afk"
-    msg = event.message.message or ""
-    if not msg.lower().startswith("afk"):
+    msg = (event.message.message or "").lower().lstrip("/")
+    if not msg.startswith("afk"):
         return
     reason = (event.pattern_match.group(1) or "AFK").strip()
     cur.execute("INSERT OR REPLACE INTO afk VALUES(?,?,?)",
@@ -1657,25 +1694,6 @@ async def cmd_afk(event):
     )
     if not await send_media_reply(event, "afk", caption):
         await event.reply(caption)
-
-
-@client.on(events.NewMessage(pattern=r"^/?brb(?:@\w+)?(?:\s+(.+))?$", func=lambda e: e.is_group))
-async def cmd_brb(event):
-    msg = event.message.message or ""
-    if not msg.lower().startswith("brb"):
-        return
-    reason = (event.pattern_match.group(1) or "BRB").strip()
-    cur.execute("INSERT OR REPLACE INTO afk VALUES(?,?,?)",
-                (event.sender_id, reason, time.time()))
-    conn.commit()
-    sender = await event.get_sender()
-    caption = (
-        f"🔙 **{sender.first_name}** will be back\n\n"
-        f"  {BULLET} Note: {reason}"
-    )
-    if not await send_media_reply(event, "brb", caption):
-        await event.reply(caption)
-
 
 # ═══════════════════════════════════════════════════════════
 # CONSENT SYSTEM — hug / kiss / sex
@@ -1981,42 +1999,54 @@ async def cmd_nekos_fun(event):
 @client.on(events.NewMessage(pattern=r"^/couple(?:@\w+)?$"))
 async def cmd_couple(event):
     chat_id = event.chat_id
-    try:
-        users = []
-        async for u in client.iter_participants(chat_id):
-            if not u.bot and not u.deleted:
-                users.append(u)
-        if len(users) < 2:
-            return await event.reply(error("Need at least 2 members"))
-        a, b = random.sample(users, 2)
-        pct = random.randint(50, 100)
-        caption = (
-            f"🎀 **Couple Of The Day** 🎀\n\n"
-            f"  {BULLET} {mention(a.id, a.first_name)} + {mention(b.id, b.first_name)}\n"
-            f"  {BULLET} Compatibility: {pct}%"
-        )
-        if not await send_media_reply(event, "couple", caption):
-            await event.reply(caption)
-    except Exception as e:
-        await event.reply(error("Failed", str(e)))
+    now = time.time()
+    day = 86400  # 24h
 
-async def _pick_target_or_random(event):
-    """Return (user_id, name). Uses target if given, else random member."""
-    uid, name = await resolve_target(event)
-    if uid:
-        return uid, name
-    # Pick random member
-    try:
-        users = []
-        async for u in client.iter_participants(event.chat_id):
-            if not u.bot and not u.deleted and u.id != event.sender_id:
-                users.append(u)
-        if users:
-            u = random.choice(users)
-            return u.id, getattr(u, "first_name", str(u.id))
-    except Exception:
-        pass
-    return None, None
+    # Check cached
+    cur.execute("SELECT * FROM couple_daily WHERE chat_id=?", (chat_id,))
+    row = cur.fetchone()
+    if row and now - row["set_at"] < day:
+        # Use cached — but verify both users still exist in group
+        try:
+            await client.get_entity(row["user1_id"])
+            await client.get_entity(row["user2_id"])
+            a_name = row["user1_name"]
+            b_name = row["user2_name"]
+            a_id = row["user1_id"]
+            b_id = row["user2_id"]
+            pct = row["pct"]
+        except Exception:
+            # One left — regenerate
+            row = None
+
+    if not row or now - row["set_at"] >= day:
+        try:
+            users = []
+            async for u in client.iter_participants(chat_id):
+                if not u.bot and not u.deleted:
+                    users.append(u)
+            if len(users) < 2:
+                return await event.reply(error("Need at least 2 members"))
+            a, b = random.sample(users, 2)
+            a_id, a_name = a.id, a.first_name
+            b_id, b_name = b.id, b.first_name
+            pct = random.randint(50, 100)
+
+            cur.execute(
+                "INSERT OR REPLACE INTO couple_daily VALUES(?,?,?,?,?,?,?)",
+                (chat_id, a_id, a_name, b_id, b_name, pct, now)
+            )
+            conn.commit()
+        except Exception as e:
+            return await event.reply(error("Failed", str(e)))
+
+    caption = (
+        f"🎀 **Couple Of The Day** 🎀\n\n"
+        f"  {BULLET} {mention(a_id, a_name)} + {mention(b_id, b_name)}\n"
+        f"  {BULLET} Compatibility: {pct}%"
+    )
+    if not await send_media_reply(event, "couple", caption):
+        await event.reply(caption)
 
 
 @client.on(events.NewMessage(pattern=r"^/love(?:@\w+)?(?:\s+.*)?$"))
@@ -2109,26 +2139,55 @@ async def cmd_iq(event):
 @client.on(events.NewMessage(pattern=r"^/waifu(?:@\w+)?$"))
 async def cmd_waifu(event):
     chat_id = event.chat_id
+    user_id = event.sender_id
     sender = await event.get_sender()
-    try:
-        users = []
-        async for u in client.iter_participants(chat_id):
-            if not u.bot and not u.deleted:
-                users.append(u)
-        if not users:
-            return await event.reply(error("No members found"))
-        w = random.choice(users)
-        pct = random.randint(50, 100)
-        caption = (
-            f"✨ **{sender.first_name}'s Today's Waifu** ✨\n\n"
-            f"  {BULLET} {mention(w.id, w.first_name)}\n"
-            f"  {BULLET} Bond: {pct}%"
-        )
-        if not await send_media_reply(event, "waifu", caption):
-            await event.reply(caption)
-    except Exception as e:
-        await event.reply(error("Failed", str(e)))
+    now = time.time()
+    day = 86400
 
+    # Check cached
+    cur.execute("SELECT * FROM waifu_daily WHERE chat_id=? AND user_id=?",
+                (chat_id, user_id))
+    row = cur.fetchone()
+    w_id = None
+    w_name = None
+    pct = None
+
+    if row and now - row["set_at"] < day:
+        try:
+            await client.get_entity(row["waifu_id"])
+            w_id = row["waifu_id"]
+            w_name = row["waifu_name"]
+            pct = row["pct"]
+        except Exception:
+            row = None
+
+    if not w_id:
+        try:
+            users = []
+            async for u in client.iter_participants(chat_id):
+                if not u.bot and not u.deleted:
+                    users.append(u)
+            if not users:
+                return await event.reply(error("No members found"))
+            w = random.choice(users)
+            w_id, w_name = w.id, w.first_name
+            pct = random.randint(50, 100)
+
+            cur.execute(
+                "INSERT OR REPLACE INTO waifu_daily VALUES(?,?,?,?,?,?)",
+                (chat_id, user_id, w_id, w_name, pct, now)
+            )
+            conn.commit()
+        except Exception as e:
+            return await event.reply(error("Failed", str(e)))
+
+    caption = (
+        f"✨ **{sender.first_name}'s Today's Waifu** ✨\n\n"
+        f"  {BULLET} {mention(w_id, w_name)}\n"
+        f"  {BULLET} Bond: {pct}%"
+    )
+    if not await send_media_reply(event, "waifu", caption):
+        await event.reply(caption)
 
 @client.on(events.NewMessage(pattern=r"^/wish(?:@\w+)?\s+(.+)$"))
 async def cmd_wish(event):
@@ -2142,6 +2201,90 @@ async def cmd_wish(event):
     if not await send_media_reply(event, "wish", caption):
         await event.reply(caption)
 
+@client.on(events.NewMessage(pattern=r"^/couple_reset(?:@\w+)?$"))
+async def cmd_couple_reset(event):
+    if not await require_admin(event):
+        return
+    cur.execute("DELETE FROM couple_daily WHERE chat_id=?", (event.chat_id,))
+    conn.commit()
+    await event.reply(success("Couple reset — next /couple will pick new"))
+
+
+@client.on(events.NewMessage(pattern=r"^/waifu_reset(?:@\w+)?$"))
+async def cmd_waifu_reset(event):
+    cur.execute("DELETE FROM waifu_daily WHERE chat_id=? AND user_id=?",
+                (event.chat_id, event.sender_id))
+    conn.commit()
+    await event.reply(success("Your waifu reset — next /waifu will pick new"))
+
+@client.on(events.NewMessage(pattern=r"^/brotherhood(?:@\w+)?(?:\s+.*)?$"))
+async def cmd_brotherhood(event):
+    sender = await event.get_sender()
+    uid, name = await _pick_target_or_random(event)
+    if not uid:
+        return await event.reply(error("No target found"))
+    pct = random.randint(1, 100)
+
+    # Brotherhood progression — more handshakes for higher %
+    if pct >= 80:
+        bar = "🤝🤝🤝🤝🤝"
+        vibe = "Blood brothers"
+    elif pct >= 60:
+        bar = "🤝🤝🤝🤝"
+        vibe = "Solid homies"
+    elif pct >= 40:
+        bar = "🤝🤝🤝"
+        vibe = "Good friends"
+    elif pct >= 20:
+        bar = "🤝🤝"
+        vibe = "Acquaintances"
+    else:
+        bar = "🤝"
+        vibe = "Strangers"
+
+    caption = (
+        f"🤝 **Brotherhood**\n\n"
+        f"  {BULLET} {mention(sender.id, sender.first_name)} + {mention(uid, name)}\n"
+        f"  {BULLET} Bhaichara: {pct}%\n"
+        f"  {BULLET} Vibe: {vibe}\n"
+        f"  {BULLET} {bar}"
+    )
+    if not await send_media_reply(event, "brotherhood", caption):
+        await event.reply(caption)
+
+@client.on(events.NewMessage(pattern=r"^/sisterhood(?:@\w+)?(?:\s+.*)?$"))
+async def cmd_sisterhood(event):
+    sender = await event.get_sender()
+    uid, name = await _pick_target_or_random(event)
+    if not uid:
+        return await event.reply(error("No target found"))
+    pct = random.randint(1, 100)
+
+    if pct >= 80:
+        bar = "💅💅💅💅💅"
+        vibe = "Soul sisters"
+    elif pct >= 60:
+        bar = "💅💅💅💅"
+        vibe = "Besties"
+    elif pct >= 40:
+        bar = "💅💅💅"
+        vibe = "Close friends"
+    elif pct >= 20:
+        bar = "💅💅"
+        vibe = "Friendly"
+    else:
+        bar = "💅"
+        vibe = "Just met"
+
+    caption = (
+        f"💅 **Sisterhood**\n\n"
+        f"  {BULLET} {mention(sender.id, sender.first_name)} + {mention(uid, name)}\n"
+        f"  {BULLET} Behen-chara: {pct}%\n"
+        f"  {BULLET} Vibe: {vibe}\n"
+        f"  {BULLET} {bar}"
+    )
+    if not await send_media_reply(event, "sisterhood", caption):
+        await event.reply(caption)
 
 # ═══════════════════════════════════════════════════════════
 # GAMES — truth / dare / wyr
