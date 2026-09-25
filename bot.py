@@ -2598,7 +2598,6 @@ async def message_handler(event):
     if not msg or msg.startswith("/"):
         return
 
-
     # ── Streak update ──
     try:
         sender = await event.get_sender()
@@ -2624,7 +2623,7 @@ async def message_handler(event):
     except Exception as e:
         log(f"[streak update failed] {e}")
 
-        # ── 1. Filters ──
+ # ── 1. Filters ──
     try:
         text_lower = msg.lower()
         cur.execute(
@@ -2780,29 +2779,3 @@ if __name__ == "__main__":
             client.loop.run_until_complete(client.disconnect())
         except Exception:
             pass
-
-
-    # ── Streak update ──
-    try:
-        sender = await event.get_sender()
-        sname = getattr(sender, "first_name", "user")
-        milestone = await update_streak(event.chat_id, event.sender_id, sname)
-        if milestone:
-            days, longest = milestone
-            if days == 7:
-                header = "🔥 **{name} hit a 7-day streak!** 🔥"
-            elif days == 30:
-                header = "🔥🔥 **{name} hit 30 days!** 🔥🔥"
-            elif days == 100:
-                header = "💎 **{name} hit 100 days!** 💎"
-            elif days == 365:
-                header = "👑 **{name} hit 365 days!** 👑"
-            else:
-                header = "🔥 **{name} hit {n} days!** 🔥"
-            msg_text = header.format(name=sname, n=days) + f"\n\n  {BULLET} Keep it up!"
-            try:
-                await client.send_message(event.chat_id, msg_text)
-            except Exception:
-                pass
-    except Exception as e:
-        log(f"[streak update failed] {e}")
