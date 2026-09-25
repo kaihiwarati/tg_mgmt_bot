@@ -549,11 +549,8 @@ HELP_PAGES = {
     6: ("📌 Pins & Locks", [
         "/pin — Pin reply",
         "/unpin — Unpin",
-        "/lock <type> — Lock type",
         "/lockall — Lock all",
         "/unlockall — Unlock all",
-        "/lock_media — Lock media only",
-        "/unlock_media — Unlock media",
         "/locks — List locks",
     ]),
     7: ("⚠️ Warn & Tag", [
@@ -1213,88 +1210,6 @@ async def cmd_unlockall(event):
         await event.reply(success("Chat unlocked"))
     except Exception as e:
         await event.reply(error("Failed", str(e)))
-
-@client.on(events.NewMessage(pattern=r"^/lock_media(?:@\w+)?$"))
-async def cmd_lock_media(event):
-    """Lock only media — text still allowed."""
-    if not await require_admin(event):
-        return
-    chat_id = event.chat_id
-    try:
-        # Get current default rights to preserve other restrictions
-        try:
-            entity = await client.get_entity(chat_id)
-            current = entity.default_banned_rights if hasattr(entity, "default_banned_rights") else None
-        except Exception:
-            current = None
-
-        # Build new rights — only restrict media, keep others as current
-        rights = ChatBannedRights(
-            until_date=0,
-            view_messages=current.view_messages if current else False,
-            send_messages=current.send_messages if current else False,
-            send_media=True,       # lock media
-            send_stickers=True,    # lock stickers
-            send_gifs=True,        # lock gifs
-            send_games=current.send_games if current else False,
-            send_inline=current.send_inline if current else False,
-            embed_links=current.embed_links if current else False,
-            send_polls=current.send_polls if current else False,
-        )
-
-        await client(EditChatDefaultBannedRightsRequest(chat_id, rights))
-
-        # Save to DB so /locks reflects it
-        cur.execute("INSERT OR IGNORE INTO locks VALUES(?,?)", (chat_id, "media"))
-        conn.commit()
-
-        await event.reply(success("Media locked", [("Note", "Text still allowed")]))
-    except Exception as e:
-        await event.reply(error("Failed", f"`{e}`"))
-
-
-@client.on(events.NewMessage(pattern=r"^/unlock_media(?:@\w+)?$"))
-async def cmd_unlock_media(event):
-    """Unlock media — but keep other locks intact."""
-    if not await require_admin(event):
-        return
-    chat_id = event.chat_id
-    try:
-        # Remove media flags from DB
-        cur.execute(
-            "DELETE FROM locks WHERE chat_id=? AND lock_type IN ('media','stickers','gifs')",
-            (chat_id,)
-        )
-        conn.commit()
-
-        # Rebuild default rights from remaining locks
-        cur.execute("SELECT lock_type FROM locks WHERE chat_id=?", (chat_id,))
-        remaining = {r["lock_type"] for r in cur.fetchall()}
-
-        kwargs = {
-            "until_date": 0,
-            "send_media": False,
-            "send_stickers": False,
-            "send_gifs": False,
-        }
-        for t in remaining:
-            kwargs.update(LOCK_TYPES.get(t, {}))
-
-        rights = ChatBannedRights(**kwargs)
-        await client(EditChatDefaultBannedRightsRequest(chat_id, rights))
-
-        await event.reply(success("Media unlocked"))
-    except Exception as e:
-        await event.reply(error("Failed", f"`{e}`"))
-
-@client.on(events.NewMessage(pattern=r"^/locks(?:@\w+)?$"))
-async def cmd_locks(event):
-    chat_id = event.chat_id
-    cur.execute("SELECT lock_type FROM locks WHERE chat_id=?", (chat_id,))
-    rows = cur.fetchall()
-    if not rows:
-        return await event.reply(error("No locks active"))
-    await event.reply(list_panel("🔒", "Active locks", [r["lock_type"] for r in rows]))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -2048,6 +1963,22 @@ async def cmd_couple(event):
     if not await send_media_reply(event, "couple", caption):
         await event.reply(caption)
 
+async def _pick_target_or_random(event):
+    """Return (user_id, name). Uses target if given, else random member."""
+    uid, name = await resolve_target(event)
+    if uid:
+        return uid, name
+    try:
+        users = []
+        async for u in client.iter_participants(event.chat_id):
+            if not u.bot and not u.deleted and u.id != event.sender_id:
+                users.append(u)
+        if users:
+            u = random.choice(users)
+            return u.id, getattr(u, "first_name", str(u.id))
+    except Exception:
+        pass
+    return None, None
 
 @client.on(events.NewMessage(pattern=r"^/love(?:@\w+)?(?:\s+.*)?$"))
 async def cmd_love(event):
