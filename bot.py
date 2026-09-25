@@ -271,6 +271,18 @@ def init_db():
         set_at REAL,
         PRIMARY KEY (chat_id, user_id)
     );
+        CREATE TABLE IF NOT EXISTS streaks (
+        chat_id INTEGER,
+        user_id INTEGER,
+        current INTEGER DEFAULT 0,
+        longest INTEGER DEFAULT 0,
+        today_count INTEGER DEFAULT 0,
+        last_counted TEXT,
+        last_streak_day TEXT,
+        name TEXT,
+        PRIMARY KEY (chat_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_streaks_chat ON streaks(chat_id);
     """)
     conn.commit()
 
@@ -297,6 +309,113 @@ def del_setting(chat_id: int, key: str):
     cur.execute("DELETE FROM settings WHERE chat_id=? AND key=?", (chat_id, key))
     conn.commit()
 
+# ═══════════════════════════════════════════════════════════
+# STREAK SYSTEM
+# ═══════════════════════════════════════════════════════════
+
+STREAK_THRESHOLD = 50
+STREAK_MILESTONES = {7, 30, 100, 365}
+
+
+def _today_str() -> str:
+    """UTC date as YYYY-MM-DD."""
+    return datetime.utcnow().strftime("%Y-%m-%d")
+
+
+def _yesterday_str() -> str:
+    return (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+async def update_streak(chat_id: int, user_id: int, name: str):
+    """Called on every group message. Returns (milestone, current) if hit, else None."""
+    today = _today_str()
+    yesterday = _yesterday_str()
+
+    cur.execute(
+        "SELECT * FROM streaks WHERE chat_id=? AND user_id=?",
+        (chat_id, user_id)
+    )
+    row = cur.fetchone()
+
+    if not row:
+        # First message ever
+        cur.execute(
+            "INSERT INTO streaks(chat_id,user_id,current,longest,today_count,last_counted,last_streak_day,name) "
+            "VALUES(?,?,0,0,1,?,NULL,?)",
+            (chat_id, user_id, today, name)
+        )
+        conn.commit()
+        return None
+
+    last_counted = row["last_counted"]
+    last_streak_day = row["last_streak_day"]
+    current = row["current"]
+    longest = row["longest"]
+
+    # Update name in case it changed
+    if row["name"] != name:
+        cur.execute(
+            "UPDATE streaks SET name=? WHERE chat_id=? AND user_id=?",
+            (name, chat_id, user_id)
+        )
+
+    if last_counted == today:
+        # Same day — just increment today_count
+        new_count = row["today_count"] + 1
+    else:
+        # New day — reset today_count to 1
+        new_count = 1
+
+    # Check if streak should be broken
+    # If last_streak_day is neither yesterday nor today, streak is broken
+    if last_streak_day and last_streak_day not in (today, yesterday):
+        # Broken — reset current to 0
+        current = 0
+
+    milestone_hit = None
+
+    # Check if we just crossed the threshold today
+    if new_count >= STREAK_THRESHOLD and last_streak_day != today:
+        # First time hitting 50 today — increment streak
+        current += 1
+        if current > longest:
+            longest = current
+        last_streak_day = today
+
+        # Check milestone
+        if current in STREAK_MILESTONES:
+            milestone_hit = (current, longest)
+
+    cur.execute(
+        "UPDATE streaks SET current=?, longest=?, today_count=?, last_counted=?, last_streak_day=?, name=? "
+        "WHERE chat_id=? AND user_id=?",
+        (current, longest, new_count, today, last_streak_day, name, chat_id, user_id)
+    )
+    conn.commit()
+
+    if milestone_hit:
+        return (milestone_hit[0], longest)
+    return None
+
+
+def get_streak(chat_id: int, user_id: int):
+    """Return streak row or None."""
+    cur.execute(
+        "SELECT * FROM streaks WHERE chat_id=? AND user_id=?",
+        (chat_id, user_id)
+    )
+    return cur.fetchone()
+
+
+def get_streak_rank(chat_id: int, user_id: int) -> int:
+    """Return the user's rank in this chat by current streak (1 = highest)."""
+    cur.execute(
+        "SELECT COUNT(*) + 1 AS rank FROM streaks "
+        "WHERE chat_id=? AND current > (SELECT COALESCE(current,0) FROM streaks WHERE chat_id=? AND user_id=?)",
+        (chat_id, chat_id, user_id)
+    )
+    row = cur.fetchone()
+    return row["rank"] if row else 0
 
 # ═══════════════════════════════════════════════════════════
 # PERMISSIONS
@@ -594,6 +713,12 @@ HELP_PAGES = {
         "/truth — Random truth question",
         "/dare — Random dare challenge",
         "/wyr — Would You Rather",
+    ]),
+    12: ("🔥 Streaks", [
+        "/streak — Your streak",
+        "/streak @user — Their streak",
+        "/topstreaks — Leaderboard",
+        f"Send {STREAK_THRESHOLD}+ msgs/day to keep it",
     ]),
 }
 TOTAL_HELP_PAGES = len(HELP_PAGES)
@@ -2473,6 +2598,32 @@ async def message_handler(event):
     if not msg or msg.startswith("/"):
         return
 
+
+    # ── Streak update ──
+    try:
+        sender = await event.get_sender()
+        sname = getattr(sender, "first_name", "user")
+        milestone = await update_streak(event.chat_id, event.sender_id, sname)
+        if milestone:
+            days, longest = milestone
+            if days == 7:
+                header = "🔥 **{name} hit a 7-day streak!** 🔥"
+            elif days == 30:
+                header = "🔥🔥 **{name} hit 30 days!** 🔥🔥"
+            elif days == 100:
+                header = "💎 **{name} hit 100 days!** 💎"
+            elif days == 365:
+                header = "👑 **{name} hit 365 days!** 👑"
+            else:
+                header = "🔥 **{name} hit {n} days!** 🔥"
+            msg_text = header.format(name=sname, n=days) + f"\n\n  {BULLET} Keep it up!"
+            try:
+                await client.send_message(event.chat_id, msg_text)
+            except Exception:
+                pass
+    except Exception as e:
+        log(f"[streak update failed] {e}")
+
         # ── 1. Filters ──
     try:
         text_lower = msg.lower()
@@ -2629,3 +2780,29 @@ if __name__ == "__main__":
             client.loop.run_until_complete(client.disconnect())
         except Exception:
             pass
+
+
+    # ── Streak update ──
+    try:
+        sender = await event.get_sender()
+        sname = getattr(sender, "first_name", "user")
+        milestone = await update_streak(event.chat_id, event.sender_id, sname)
+        if milestone:
+            days, longest = milestone
+            if days == 7:
+                header = "🔥 **{name} hit a 7-day streak!** 🔥"
+            elif days == 30:
+                header = "🔥🔥 **{name} hit 30 days!** 🔥🔥"
+            elif days == 100:
+                header = "💎 **{name} hit 100 days!** 💎"
+            elif days == 365:
+                header = "👑 **{name} hit 365 days!** 👑"
+            else:
+                header = "🔥 **{name} hit {n} days!** 🔥"
+            msg_text = header.format(name=sname, n=days) + f"\n\n  {BULLET} Keep it up!"
+            try:
+                await client.send_message(event.chat_id, msg_text)
+            except Exception:
+                pass
+    except Exception as e:
+        log(f"[streak update failed] {e}")
