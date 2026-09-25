@@ -705,6 +705,7 @@ HELP_PAGES = {
         "/crush — Crush level %",
         "/brotherhood — Bhaichara meter",
         "/sisterhood — Behen-chara meter",
+        "/friendship — Dosti meter",
         "/iq — Random IQ",
         "/wish <text> — Make a wish",
         "/afk [reason] — Set AFK",
@@ -2198,30 +2199,37 @@ async def cmd_waifu(event):
     user_id = event.sender_id
     sender = await event.get_sender()
     now = time.time()
-    day = 86400
+    day = 86400  # 24 hours
 
-    # Check cached
-    cur.execute("SELECT * FROM waifu_daily WHERE chat_id=? AND user_id=?",
-                (chat_id, user_id))
+    # Check cache for THIS user in THIS chat
+    cur.execute(
+        "SELECT waifu_id, waifu_name, pct, set_at FROM waifu_daily "
+        "WHERE chat_id=? AND user_id=?",
+        (chat_id, user_id)
+    )
     row = cur.fetchone()
+
     w_id = None
     w_name = None
     pct = None
 
-    if row and now - row["set_at"] < day:
+    if row and (now - row["set_at"]) < day:
+        # Valid cache — verify user still exists
         try:
             await client.get_entity(row["waifu_id"])
             w_id = row["waifu_id"]
             w_name = row["waifu_name"]
             pct = row["pct"]
         except Exception:
-            row = None
+            # Waifu left the group — regenerate
+            w_id = None
 
     if not w_id:
+        # Generate new waifu for this user
         try:
             users = []
             async for u in client.iter_participants(chat_id):
-                if not u.bot and not u.deleted:
+                if not u.bot and not u.deleted and u.id != user_id:
                     users.append(u)
             if not users:
                 return await event.reply(error("No members found"))
@@ -2230,7 +2238,8 @@ async def cmd_waifu(event):
             pct = random.randint(50, 100)
 
             cur.execute(
-                "INSERT OR REPLACE INTO waifu_daily VALUES(?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO waifu_daily(chat_id,user_id,waifu_id,waifu_name,pct,set_at) "
+                "VALUES(?,?,?,?,?,?)",
                 (chat_id, user_id, w_id, w_name, pct, now)
             )
             conn.commit()
@@ -2244,6 +2253,15 @@ async def cmd_waifu(event):
     )
     if not await send_media_reply(event, "waifu", caption):
         await event.reply(caption)
+
+@client.on(events.NewMessage(pattern=r"^/clearwaifu(?:@\w+)?$"))
+async def cmd_clear_waifu(event):
+    if event.sender_id not in SUPERADMINS:
+        return
+    cur.execute("DELETE FROM waifu_daily")
+    conn.commit()
+    await event.reply("✅ All waifu cache cleared")
+
 
 @client.on(events.NewMessage(pattern=r"^/wish(?:@\w+)?\s+(.+)$"))
 async def cmd_wish(event):
@@ -2341,6 +2359,115 @@ async def cmd_sisterhood(event):
     )
     if not await send_media_reply(event, "sisterhood", caption):
         await event.reply(caption)
+
+@client.on(events.NewMessage(pattern=r"^/friendship(?:@\w+)?(?:\s+.*)?$"))
+async def cmd_friendship(event):
+    sender = await event.get_sender()
+    uid, name = await _pick_target_or_random(event)
+    if not uid:
+        return await event.reply(error("No target found"))
+    pct = random.randint(1, 100)
+
+    if pct >= 80:
+        bar = "🫂🫂🫂🫂🫂"
+        vibe = "Ride or die"
+    elif pct >= 60:
+        bar = "🫂🫂🫂🫂"
+        vibe = "Best friends"
+    elif pct >= 40:
+        bar = "🫂🫂🫂"
+        vibe = "Good friends"
+    elif pct >= 20:
+        bar = "🫂🫂"
+        vibe = "Getting there"
+    else:
+        bar = "🫂"
+        vibe = "Acquaintances"
+
+    caption = (
+        f"🫂 **Friendship**\n\n"
+        f"  {BULLET} {mention(sender.id, sender.first_name)} + {mention(uid, name)}\n"
+        f"  {BULLET} Dosti: {pct}%\n"
+        f"  {BULLET} Vibe: {vibe}\n"
+        f"  {BULLET} {bar}"
+    )
+    if not await send_media_reply(event, "friendship", caption):
+        await event.reply(caption)
+
+# ═══════════════════════════════════════════════════════════
+# STREAK COMMANDS
+# ═══════════════════════════════════════════════════════════
+
+@client.on(events.NewMessage(pattern=r"^/streak(?:@\w+)?(?:\s+.*)?$"))
+async def cmd_streak(event):
+    uid, name = await resolve_target(event)
+    if not uid:
+        uid = event.sender_id
+        sender = await event.get_sender()
+        name = getattr(sender, "first_name", "you")
+
+    row = get_streak(event.chat_id, uid)
+    if not row:
+        return await event.reply(info(f"Streak — {name}", [
+            ("Status", "No activity yet"),
+            ("Tip", f"Send {STREAK_THRESHOLD} messages to start"),
+        ]))
+
+    current = row["current"]
+    longest = row["longest"]
+    today_count = row["today_count"]
+    last_counted = row["last_counted"]
+    last_streak_day = row["last_streak_day"]
+
+    today = _today_str()
+    yesterday = _yesterday_str()
+
+    # Status line
+    if last_streak_day in (today, yesterday) and current > 0:
+        progress = min(today_count, STREAK_THRESHOLD) if last_counted == today else 0
+        status_line = f"{progress} / {STREAK_THRESHOLD} msgs"
+    elif current == 0:
+        if last_streak_day:
+            status_line = f"Streak ended (last: {last_streak_day})"
+        else:
+            status_line = "Not started"
+    else:
+        status_line = f"{today_count} / {STREAK_THRESHOLD} msgs"
+
+    rank = get_streak_rank(event.chat_id, uid)
+
+    fields = [
+        ("User", name),
+        ("Current", f"{current} days"),
+        ("Longest", f"{longest} days"),
+        ("Today", status_line),
+    ]
+    if rank > 0:
+        fields.append(("Rank", f"#{rank} in this group"))
+
+    await event.reply(info("Streak", fields))
+
+
+@client.on(events.NewMessage(pattern=r"^/topstreaks(?:@\w+)?$"))
+async def cmd_topstreaks(event):
+    cur.execute(
+        "SELECT name, current, longest FROM streaks WHERE chat_id=? "
+        "ORDER BY current DESC, longest DESC LIMIT 10",
+        (event.chat_id,)
+    )
+    rows = cur.fetchall()
+    if not rows:
+        return await event.reply(error("No streaks yet"))
+
+    items = []
+    medals = ["🥇", "🥈", "🥉"]
+    for i, r in enumerate(rows, 1):
+        prefix = medals[i-1] if i <= 3 else f"{i}."
+        n = r["name"] or "user"
+        items.append(f"{prefix} {n} — {r['current']} days (best: {r['longest']})")
+
+    await event.reply(list_panel("🏆", "Top Streaks", items, max_show=10))
+
 
 # ═══════════════════════════════════════════════════════════
 # GAMES — truth / dare / wyr
