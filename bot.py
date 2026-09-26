@@ -374,11 +374,11 @@ STREAK_MILESTONES = {7, 30, 100, 365}
 
 def _today_str() -> str:
     """UTC date as YYYY-MM-DD."""
-    return datetime.utcnow().strftime("%Y-%m-%d")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def _yesterday_str() -> str:
-    return (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
+    return (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 async def update_streak(chat_id: int, user_id: int, name: str):
@@ -941,7 +941,7 @@ async def log_action(action: str, actor, target_name: str = "",
     try:
         actor_name = getattr(actor, "first_name", str(actor)) if actor else "system"
         actor_id = getattr(actor, "id", 0) if actor else 0
-        ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         text = (
             f"⭐ **{action.upper()} EVENT**\n\n"
             f"  {BULLET} User: {target_name}\n"
@@ -1356,7 +1356,7 @@ async def antiflood_watch(event):
     arr[:] = [t for t in arr if now - t < 10]
     if len(arr) >= int(limit):
         try:
-            until = int((datetime.utcnow() + timedelta(minutes=10)).timestamp())
+            until = int((datetime.now(timezone.utc) + timedelta(minutes=10)).timestamp())
             await apply_mute(event.chat_id, event.sender_id, until=until)
             await event.reply(success("Muted", [("Reason", "Flood"), ("Duration", "10m")]))
         except Exception:
@@ -1457,7 +1457,7 @@ async def cmd_tmute(event):
     uid, name = await resolve_target(event)
     if not uid:
         return await event.reply(error("Usage", "`/tmute 10m @username` or reply"))
-    until = int((datetime.utcnow() + timedelta(seconds=secs)).timestamp())
+    until = int((datetime.now(timezone.utc) + timedelta(seconds=secs)).timestamp())
     try:
         await apply_mute(chat_id, uid, until=until)
         await log_action("TMute", await event.get_sender(), name, extra=f"for {tstr}")
