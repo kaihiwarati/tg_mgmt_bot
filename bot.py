@@ -3369,17 +3369,6 @@ async def main():
     await client.run_until_disconnected()
 
 
-if __name__ == "__main__":
-    try:
-        client.loop.run_until_complete(main())
-    except KeyboardInterrupt:
-        print("\n👋 Shutting down cleanly…")
-    finally:
-        try:
-            client.loop.run_until_complete(client.disconnect())
-        except Exception:
-            pass
-
 # ═══════════════════════════════════════════════════════════
 # FAMILY SYSTEM
 # ═══════════════════════════════════════════════════════════
