@@ -2583,7 +2583,7 @@ async def cb_family(event):
         await event.answer("Accepted ✅")
     except Exception as e:
         log(f"[family accept failed] {e}")
-        await event.answer(f"Failed: {e}", alert=True)ok
+        await event.answer(f"Failed: {e}", alert=True)
 
 # ═══════════════════════════════════════════════════════════
 # CONSENT COMMANDS — hug / kiss / sex
@@ -3250,6 +3250,16 @@ TRUTH_POOL = [
     "What's the strangest thing you've ever eaten?",
     "What's the most money you've ever spent on one thing?",
     "What's the last thing that made you cry laughing?",
+    "Have you ever friend-zoned someone you actually found attractive?",
+    "Have you ever led someone on?",
+    "What's the biggest lie you've told to get out of a date?",
+    "Have you ever checked whether your ex is still single?",
+    "Who's the one person you could never say no to?",
+    "Have you ever fallen for someone who was completely wrong for you?",
+    "What's the most embarrassing thing you've done because you liked someone?",
+    "Have you ever had feelings for someone your friend liked?",
+    "If your crush texted come over right now, would you go?",
+    "What's one secret about your love life nobody here knows?",
 ]
 
 DARE_POOL = [
@@ -3293,6 +3303,11 @@ DARE_POOL = [
     "Reveal the last thing you saved on Instagram/TikTok.",
     "Send a text to someone with 'I knew it' and screenshot their reply.",
     "Describe your day in exactly 3 emojis, no text.",
+    "Give someone in the room a 10-second intense eye-contact challenge",
+    "Show the group your most recent search history",
+    "Admit who you'd choose for a date if you had to pick someone here",
+    "Change your status to “Currently accepting applications 👀” for 30 minutes",
+    "Send your last selfie to the group",
 ]
 
 WYR_POOL = [
