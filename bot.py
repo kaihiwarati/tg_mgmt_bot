@@ -338,6 +338,13 @@ def init_db():
         updated_at REAL,
         PRIMARY KEY (chat_id, user_id)
     );
+        CREATE TABLE IF NOT EXISTS user_stats (
+        chat_id INTEGER,
+        user_id INTEGER,
+        total_messages INTEGER DEFAULT 0,
+        PRIMARY KEY (chat_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_stats_chat ON user_stats(chat_id);
     """)
     conn.commit()
 
@@ -3202,6 +3209,7 @@ async def message_handler(event):
     try:
         sender = await event.get_sender()
         sname = getattr(sender, "first_name", "user")
+        increment_messages(event.chat_id, event.sender_id) # Increment total message count
         milestone = await update_streak(event.chat_id, event.sender_id, sname)
         if milestone:
             days, longest = milestone
@@ -3722,11 +3730,20 @@ async def cmd_profile(event):
     display_name = prof["custom_name"] if (prof and prof["custom_name"]) else default_name
     photo_ref = prof["photo_ref"] if prof else None
 
+    # Total messages
+    total_msgs = get_total_messages(chat_id, uid)
+
     # Streak
     streak_row = get_streak(chat_id, uid)
     streak_current = streak_row["current"] if streak_row else 0
     streak_longest = streak_row["longest"] if streak_row else 0
+    today_count = streak_row["today_count"] if streak_row else 0
     rank = get_streak_rank(chat_id, uid)
+
+    # Progress bar for today
+    progress = min(today_count, STREAK_THRESHOLD)
+    bar_filled = progress * 10 // STREAK_THRESHOLD
+    progress_bar = "▰" * bar_filled + "▱" * (10 - bar_filled)
 
     # Warns
     cur.execute("SELECT count FROM warnings WHERE chat_id=? AND user_id=?", (chat_id, uid))
@@ -3736,33 +3753,37 @@ async def cmd_profile(event):
 
     # Marriage
     m = get_marriage(chat_id, uid)
-    spouse_text = "—"
+    spouse_id = None
+    spouse_name = None
+    romance = 0
     if m:
-        other_id = m["user2_id"] if m["user1_id"] == uid else m["user1_id"]
-        other_name = m["user2_name"] if m["user1_id"] == uid else m["user1_name"]
-        # Use custom name if spouse has one
-        other_prof = get_profile(chat_id, other_id)
+        spouse_id = m["user2_id"] if m["user1_id"] == uid else m["user1_id"]
+        spouse_name = m["user2_name"] if m["user1_id"] == uid else m["user1_name"]
+        other_prof = get_profile(chat_id, spouse_id)
         if other_prof and other_prof["custom_name"]:
-            other_name = other_prof["custom_name"]
-        spouse_text = mention(other_id, other_name)
+            spouse_name = other_prof["custom_name"]
+        romance = m["romance"] or 0
 
     # Parent
     p = get_parent(chat_id, uid)
-    parent_text = "—"
-    if p:
-        pname = p["parent_name"]
-        pprof = get_profile(chat_id, p["parent_id"])
+    parent_id = p["parent_id"] if p else None
+    parent_name = p["parent_name"] if p else None
+    if parent_id:
+        pprof = get_profile(chat_id, parent_id)
         if pprof and pprof["custom_name"]:
-            pname = pprof["custom_name"]
-        parent_text = mention(p["parent_id"], pname)
+            parent_name = pprof["custom_name"]
 
     # Children
     kids = get_children(chat_id, uid)
-    kids_text = str(len(kids)) if kids else "0"
+    kid_count = len(kids)
 
     # Friends
     friends = get_friends(chat_id, uid)
     friend_count = len(friends)
+
+    # Brothers / Sisters
+    bros = get_bonds(chat_id, uid, "brother")
+    sis = get_bonds(chat_id, uid, "sister")
 
     # Waifu today
     cur.execute(
@@ -3770,13 +3791,14 @@ async def cmd_profile(event):
         (chat_id, uid)
     )
     wrow = cur.fetchone()
-    waifu_text = "—"
+    waifu_id = None
+    waifu_name = None
     if wrow:
-        wname = wrow["waifu_name"]
-        wprof = get_profile(chat_id, wrow["waifu_id"])
+        waifu_id = wrow["waifu_id"]
+        waifu_name = wrow["waifu_name"]
+        wprof = get_profile(chat_id, waifu_id)
         if wprof and wprof["custom_name"]:
-            wname = wprof["custom_name"]
-        waifu_text = mention(wrow["waifu_id"], wname)
+            waifu_name = wprof["custom_name"]
 
     # Couple today
     cur.execute(
@@ -3784,43 +3806,102 @@ async def cmd_profile(event):
         (chat_id,)
     )
     crow = cur.fetchone()
-    couple_text = "—"
+    couple_id = None
+    couple_name = None
     if crow and uid in (crow["user1_id"], crow["user2_id"]):
-        other_id = crow["user2_id"] if crow["user1_id"] == uid else crow["user1_id"]
-        other_name = crow["user2_name"] if crow["user1_id"] == uid else crow["user1_name"]
-        cprof = get_profile(chat_id, other_id)
+        couple_id = crow["user2_id"] if crow["user1_id"] == uid else crow["user1_id"]
+        couple_name = crow["user2_name"] if crow["user1_id"] == uid else crow["user1_name"]
+        cprof = get_profile(chat_id, couple_id)
         if cprof and cprof["custom_name"]:
-            other_name = cprof["custom_name"]
-        couple_text = mention(other_id, other_name)
+            couple_name = cprof["custom_name"]
 
-    fields = [
-        (None, f"👤 **{display_name}**"),
-        ("Chat ID", f"`{uid}`"),
-        ("Rank", f"#{rank}" if rank else "—"),
-        ("Streak", f"🔥 {streak_current} days (best: {streak_longest})"),
-        ("Warnings", f"⚠️ {warn_count} / {warn_lim}"),
-        ("Married to", f"💍 {spouse_text}"),
-        ("Parent", f"👨 {parent_text}"),
-        ("Children", f"👶 {kids_text}"),
-        ("Friends", f"🤝 {friend_count}"),
-        ("Waifu today", f"💖 {waifu_text}"),
-        ("Couple today", f"🎀 {couple_text}"),
-    ]
+    # ── Build catcher-style card ──
+    ARROW = "⟶"
 
-    body = "\n\n".join(
-        f"   {BULLET} {k}: {v}" if k else f"   {v}"
-        for k, v in fields
-    )
+    def row(emoji: str, label: str, value: str) -> str:
+        return f"  {ARROW}  {emoji}  **{label}:** {value}"
 
-    card = f"👤  **Profile**\n\n{body}"
+    lines = []
+    lines.append("┏━━━━━━━━━━━━━━━━━━━━━━━━━┓")
+    lines.append("┃  ✨  **CATCHER PROFILE**  ✨  ┃")
+    lines.append("┗━━━━━━━━━━━━━━━━━━━━━━━━━┛")
+    lines.append("")
 
-    # If custom photo, send it first
+    # ── Core identity ──
+    lines.append(row("👤", "USER", f"**{display_name}**"))
+    lines.append(row("🆔", "USER ID", f"`{uid}`"))
+    lines.append(row("💬", "TOTAL MESSAGES", f"{total_msgs:,}"))
+    lines.append(row("🔥", "STREAK", f"{streak_current} days (best: {streak_longest})"))
+    if rank:
+        lines.append(row("🏆", "RANK", f"#{rank} in group"))
+
+    # ── Progress bar ──
+    lines.append("")
+    lines.append(f"  {ARROW}  📊  **TODAY PROGRESS:**")
+    lines.append(f"      {progress_bar}  {progress}/{STREAK_THRESHOLD}")
+
+    # ── Family ──
+    has_family = m or p or kid_count > 0 or friend_count > 0 or bros or sis
+
+    if has_family:
+        lines.append("")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("       👪  **FAMILY**")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("")
+
+        if m:
+            lines.append(row("💍", "MARRIED TO", mention(spouse_id, spouse_name)))
+            hearts_filled = min(5, romance // 10)
+            hearts = "❤️" * hearts_filled + "🤍" * (5 - hearts_filled)
+            lines.append(row("❤️", "ROMANCE", f"{hearts}  ({romance})"))
+
+        if p:
+            lines.append(row("👨", "PARENT", mention(parent_id, parent_name)))
+
+        if kid_count:
+            lines.append(row("👶", "CHILDREN", str(kid_count)))
+
+        if friend_count:
+            lines.append(row("🤝", "FRIENDS", str(friend_count)))
+
+        if bros:
+            lines.append(row("🤜", "BROTHERS", str(len(bros))))
+
+        if sis:
+            lines.append(row("🤛", "SISTERS", str(len(sis))))
+
+    # ── Today ──
+    if waifu_id or couple_id:
+        lines.append("")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("       ✨  **TODAY**")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("")
+
+        if waifu_id:
+            lines.append(row("💖", "WAIFU", mention(waifu_id, waifu_name)))
+
+        if couple_id:
+            lines.append(row("🎀", "COUPLE", mention(couple_id, couple_name)))
+
+    # ── Footer ──
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"     ⚜️  _{BOT_NAME}_  ·  /help")
+
+    card = "\n".join(lines)
+
+    # ── Send photo + caption if photo set, else text only ──
     if photo_ref and photo_ref.startswith("msg:"):
         try:
             _, src_chat, src_id = photo_ref.split(":")
             src_msg = await client.get_messages(int(src_chat), ids=int(src_id))
             if src_msg and src_msg.media:
-                await client.send_file(chat_id, src_msg.media, caption="")
+                # Truncate if needed (caption limit 1024)
+                caption = card if len(card) <= 1024 else card[:1000] + "…"
+                await client.send_file(chat_id, src_msg.media, caption=caption)
+                return
         except Exception as e:
             log(f"[profile photo failed] {e}")
 
@@ -3917,6 +3998,29 @@ async def cmd_clearphoto(event):
     )
     conn.commit()
     await event.reply("✅  Profile photo removed")
+
+# ═══════════════════════════════════════════════════════════
+# USER STATS
+# ═══════════════════════════════════════════════════════════
+
+def get_total_messages(chat_id: int, user_id: int) -> int:
+    cur.execute(
+        "SELECT total_messages FROM user_stats WHERE chat_id=? AND user_id=?",
+        (chat_id, user_id)
+    )
+    row = cur.fetchone()
+    return row["total_messages"] if row else 0
+
+
+def increment_messages(chat_id: int, user_id: int):
+    cur.execute(
+        "INSERT INTO user_stats(chat_id, user_id, total_messages) VALUES(?,?,1) "
+        "ON CONFLICT(chat_id, user_id) DO UPDATE SET total_messages = total_messages + 1",
+        (chat_id, user_id)
+    )
+    conn.commit()
+
+
 
 if __name__ == "__main__":
     try:
