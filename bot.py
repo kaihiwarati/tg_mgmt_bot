@@ -282,7 +282,62 @@ def init_db():
         name TEXT,
         PRIMARY KEY (chat_id, user_id)
     );
+        CREATE TABLE IF NOT EXISTS marriages (
+        chat_id INTEGER,
+        user1_id INTEGER,
+        user2_id INTEGER,
+        user1_name TEXT,
+        user2_name TEXT,
+        married_at REAL,
+        romance INTEGER DEFAULT 0,
+        PRIMARY KEY (chat_id, user1_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_marriages_chat ON marriages(chat_id);
+    CREATE INDEX IF NOT EXISTS idx_marriages_u2 ON marriages(chat_id, user2_id);
+
+    CREATE TABLE IF NOT EXISTS adoptions (
+        chat_id INTEGER,
+        parent_id INTEGER,
+        child_id INTEGER,
+        parent_name TEXT,
+        child_name TEXT,
+        adopted_at REAL,
+        PRIMARY KEY (chat_id, parent_id, child_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_adoptions_chat ON adoptions(chat_id);
+    CREATE INDEX IF NOT EXISTS idx_adoptions_child ON adoptions(chat_id, child_id);
+
+    CREATE TABLE IF NOT EXISTS friendships (
+        chat_id INTEGER,
+        user1_id INTEGER,
+        user2_id INTEGER,
+        user1_name TEXT,
+        user2_name TEXT,
+        friended_at REAL,
+        PRIMARY KEY (chat_id, user1_id, user2_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_friendships_chat ON friendships(chat_id);
+
+    CREATE TABLE IF NOT EXISTS siblingship (
+        chat_id INTEGER,
+        user1_id INTEGER,
+        user2_id INTEGER,
+        user1_name TEXT,
+        user2_name TEXT,
+        kind TEXT,
+        bonded_at REAL,
+        PRIMARY KEY (chat_id, user1_id, user2_id, kind)
+    );
+    CREATE INDEX IF NOT EXISTS idx_siblingship_chat ON siblingship(chat_id);
     CREATE INDEX IF NOT EXISTS idx_streaks_chat ON streaks(chat_id);
+    CREATE TABLE IF NOT EXISTS user_profiles (
+        chat_id INTEGER,
+        user_id INTEGER,
+        custom_name TEXT,
+        photo_ref TEXT,
+        updated_at REAL,
+        PRIMARY KEY (chat_id, user_id)
+    );
     """)
     conn.commit()
 
@@ -416,6 +471,307 @@ def get_streak_rank(chat_id: int, user_id: int) -> int:
     )
     row = cur.fetchone()
     return row["rank"] if row else 0
+
+
+# ═══════════════════════════════════════════════════════════
+# FAMILY SYSTEM — helpers
+# ═══════════════════════════════════════════════════════════
+
+def _pair(a: int, b: int):
+    """Return (min, max) for consistent pair ordering."""
+    return (a, b) if a < b else (b, a)
+
+
+def get_marriage(chat_id: int, user_id: int):
+    """Return the marriage row for this user, or None."""
+    cur.execute(
+        "SELECT * FROM marriages WHERE chat_id=? AND (user1_id=? OR user2_id=?)",
+        (chat_id, user_id, user_id)
+    )
+    return cur.fetchone()
+
+
+def get_parent(chat_id: int, user_id: int):
+    """Return the adoption row where user is the child, or None."""
+    cur.execute(
+        "SELECT * FROM adoptions WHERE chat_id=? AND child_id=?",
+        (chat_id, user_id)
+    )
+    return cur.fetchone()
+
+
+def get_children(chat_id: int, parent_id: int):
+    cur.execute(
+        "SELECT * FROM adoptions WHERE chat_id=? AND parent_id=?",
+        (chat_id, parent_id)
+    )
+    return cur.fetchall()
+
+
+def get_siblings(chat_id: int, user_id: int):
+    """Return users who share at least one parent with user_id."""
+    parent = get_parent(chat_id, user_id)
+    if not parent:
+        return []
+    cur.execute(
+        "SELECT DISTINCT child_id, child_name FROM adoptions "
+        "WHERE chat_id=? AND parent_id=? AND child_id != ?",
+        (chat_id, parent["parent_id"], user_id)
+    )
+    return cur.fetchall()
+
+
+def is_descendant(chat_id: int, ancestor_id: int, target_id: int, max_depth: int = 5) -> bool:
+    """Return True if target_id is a descendant of ancestor_id (up to max_depth)."""
+    frontier = [ancestor_id]
+    seen = set()
+    depth = 0
+    while frontier and depth < max_depth:
+        next_frontier = []
+        for pid in frontier:
+            if pid in seen:
+                continue
+            seen.add(pid)
+            cur.execute(
+                "SELECT child_id FROM adoptions WHERE chat_id=? AND parent_id=?",
+                (chat_id, pid)
+            )
+            for row in cur.fetchall():
+                cid = row["child_id"]
+                if cid == target_id:
+                    return True
+                next_frontier.append(cid)
+        frontier = next_frontier
+        depth += 1
+    return False
+
+
+def are_siblings(chat_id: int, a: int, b: int) -> bool:
+    """Return True if a and b share at least one parent."""
+    cur.execute(
+        "SELECT parent_id FROM adoptions WHERE chat_id=? AND child_id=?",
+        (chat_id, a)
+    )
+    parents_a = {r["parent_id"] for r in cur.fetchall()}
+    if not parents_a:
+        return False
+    cur.execute(
+        "SELECT parent_id FROM adoptions WHERE chat_id=? AND child_id=?",
+        (chat_id, b)
+    )
+    parents_b = {r["parent_id"] for r in cur.fetchall()}
+    return bool(parents_a & parents_b)
+
+
+def can_marry(chat_id: int, a: int, b: int):
+    """Return (True, None) if allowed, else (False, reason)."""
+    if a == b:
+        return False, "You can't marry yourself"
+    if get_marriage(chat_id, a):
+        return False, "You're already married in this group"
+    if get_marriage(chat_id, b):
+        return False, "They're already married in this group"
+    # Check lineage
+    if is_descendant(chat_id, a, b) or is_descendant(chat_id, b, a):
+        return False, "You're in the same family line"
+    # Siblings?
+    if are_siblings(chat_id, a, b):
+        return False, "You're siblings"
+    # Parent/child direct check
+    parent_a = get_parent(chat_id, a)
+    if parent_a and parent_a["parent_id"] == b:
+        return False, "That's your parent"
+    parent_b = get_parent(chat_id, b)
+    if parent_b and parent_b["parent_id"] == a:
+        return False, "That's your child"
+    return True, None
+
+
+def can_adopt(chat_id: int, parent_id: int, child_id: int):
+    """Return (True, None) if allowed, else (False, reason)."""
+    if parent_id == child_id:
+        return False, "You can't adopt yourself"
+    # Parent must not be the child's descendant (cycle)
+    if is_descendant(chat_id, child_id, parent_id):
+        return False, "This would create a family loop"
+    # Parent must not be the child's spouse
+    m = get_marriage(chat_id, parent_id)
+    if m and (m["user1_id"] == child_id or m["user2_id"] == child_id):
+        return False, "You can't adopt your spouse"
+    # Child must not already have a parent
+    if get_parent(chat_id, child_id):
+        return False, "They already have a parent (disown them first)"
+    return True, None
+
+
+def get_friends(chat_id: int, user_id: int):
+    cur.execute(
+        "SELECT user1_id, user1_name, user2_id, user2_name FROM friendships "
+        "WHERE chat_id=? AND (user1_id=? OR user2_id=?)",
+        (chat_id, user_id, user_id)
+    )
+    rows = cur.fetchall()
+    out = []
+    for r in rows:
+        if r["user1_id"] == user_id:
+            out.append((r["user2_id"], r["user2_name"]))
+        else:
+            out.append((r["user1_id"], r["user1_name"]))
+    return out
+
+
+def get_bonds(chat_id: int, user_id: int, kind: str):
+    """kind = 'brother' or 'sister'"""
+    cur.execute(
+        "SELECT user1_id, user1_name, user2_id, user2_name FROM siblingship "
+        "WHERE chat_id=? AND kind=? AND (user1_id=? OR user2_id=?)",
+        (chat_id, kind, user_id, user_id)
+    )
+    rows = cur.fetchall()
+    out = []
+    for r in rows:
+        if r["user1_id"] == user_id:
+            out.append((r["user2_id"], r["user2_name"]))
+        else:
+            out.append((r["user1_id"], r["user1_name"]))
+    return out
+
+
+# Pending family proposals: msg_id -> {kind, requester_id, target_id, requester_name, target_name, chat_id}
+pending_family: dict[int, dict] = {}
+
+
+async def send_family_proposal(event, kind: str, target_id: int, target_name: str):
+    """Send a proposal message with accept/decline buttons."""
+    sender = await event.get_sender()
+    sender_id = sender.id
+    sender_name = getattr(sender, "first_name", "user")
+
+    if target_id == sender_id:
+        return await event.reply(error("Hmm", "You can't do that to yourself"))
+
+    # Pre-validate
+    if kind == "marry":
+        ok, reason = can_marry(event.chat_id, sender_id, target_id)
+        if not ok:
+            return await event.reply(error("Can't marry", reason))
+    elif kind == "adopt":
+        ok, reason = can_adopt(event.chat_id, sender_id, target_id)
+        if not ok:
+            return await event.reply(error("Can't adopt", reason))
+    elif kind == "friend":
+        cur.execute(
+            "SELECT 1 FROM friendships WHERE chat_id=? AND "
+            "((user1_id=? AND user2_id=?) OR (user1_id=? AND user2_id=?))",
+            (event.chat_id, sender_id, target_id, target_id, sender_id)
+        )
+        if cur.fetchone():
+            return await event.reply(error("Already friends"))
+    elif kind in ("brother", "sister"):
+        cur.execute(
+            "SELECT 1 FROM siblingship WHERE chat_id=? AND kind=? AND "
+            "((user1_id=? AND user2_id=?) OR (user1_id=? AND user2_id=?))",
+            (event.chat_id, kind, sender_id, target_id, target_id, sender_id)
+        )
+        if cur.fetchone():
+            return await event.reply(error(f"Already {kind}s"))
+        # Can't be both brother AND sister
+        other_kind = "sister" if kind == "brother" else "brother"
+        cur.execute(
+            "SELECT 1 FROM siblingship WHERE chat_id=? AND kind=? AND "
+            "((user1_id=? AND user2_id=?) OR (user1_id=? AND user2_id=?))",
+            (event.chat_id, other_kind, sender_id, target_id, target_id, sender_id)
+        )
+        if cur.fetchone():
+            return await event.reply(error(f"Already {other_kind}s"))
+        # Can't be siblings if married
+        m = get_marriage(event.chat_id, sender_id)
+        if m and (m["user1_id"] == target_id or m["user2_id"] == target_id):
+            return await event.reply(error("Can't be siblings with your spouse"))
+
+    # Emoji/label per kind
+    labels = {
+        "marry": ("💌", "Marriage Proposal"),
+        "adopt": ("👶", "Adoption Request"),
+        "friend": ("🤝", "Friend Request"),
+        "brother": ("🤜", "Brother Request"),
+        "sister": ("🤛", "Sister Request"),
+    }
+    icon, title = labels[kind]
+
+    sender_m = mention(sender_id, sender_name)
+    target_m = mention(target_id, target_name)
+
+    if kind == "marry":
+        fields = [("From", sender_m), ("To", target_m)]
+    elif kind == "adopt":
+        fields = [("Parent", sender_m), ("Child", target_m)]
+    else:
+        fields = [("From", sender_m), ("To", target_m)]
+
+    body = "\n".join(f"   {BULLET} {k}: {v}" for k, v in fields)
+
+    prompt = (
+        f"{icon}  **{title}**\n\n"
+        f"{body}\n\n"
+        f"   _{target_name}, do you accept?_"
+    )
+
+    sent = await event.reply(prompt, buttons=[
+        [Button.inline("✅ Accept", f"fam:{kind}:yes:{sender_id}:{target_id}".encode()),
+         Button.inline("❌ Decline", f"fam:{kind}:no:{sender_id}:{target_id}".encode())],
+    ])
+
+    pending_family[sent.id] = {
+        "kind": kind,
+        "requester_id": sender_id,
+        "requester_name": sender_name,
+        "target_id": target_id,
+        "target_name": target_name,
+        "chat_id": event.chat_id,
+    }
+
+    asyncio.create_task(_expire_family(sent.id, event.chat_id))
+
+
+async def _expire_family(msg_id: int, chat_id: int):
+    await asyncio.sleep(60)
+    if msg_id in pending_family:
+        info_ = pending_family.pop(msg_id)
+        try:
+            await client.edit_message(
+                chat_id, msg_id,
+                f"⏱  **Request expired**\n\n   {BULLET} {info_['target_name']} didn't respond"
+            )
+        except Exception:
+            pass
+
+# ═══════════════════════════════════════════════════════════
+# PROFILE CUSTOMIZATION — helpers
+# ═══════════════════════════════════════════════════════════
+
+def get_profile(chat_id: int, user_id: int):
+    cur.execute(
+        "SELECT * FROM user_profiles WHERE chat_id=? AND user_id=?",
+        (chat_id, user_id)
+    )
+    return cur.fetchone()
+
+
+def get_display_name(chat_id: int, user_id: int, fallback: str) -> str:
+    row = get_profile(chat_id, user_id)
+    if row and row["custom_name"]:
+        return row["custom_name"]
+    return fallback
+
+
+def name_taken(chat_id: int, name: str, exclude_user_id: int = 0) -> bool:
+    cur.execute(
+        "SELECT 1 FROM user_profiles WHERE chat_id=? AND LOWER(custom_name)=LOWER(?) AND user_id != ?",
+        (chat_id, name, exclude_user_id)
+    )
+    return bool(cur.fetchone())
+
 
 # ═══════════════════════════════════════════════════════════
 # PERMISSIONS
@@ -720,6 +1076,27 @@ HELP_PAGES = {
         "/streak @user — Their streak",
         "/topstreaks — Leaderboard",
         f"Send {STREAK_THRESHOLD}+ msgs/day to keep it",
+    ]),
+    13: ("👪 Family & Profile", [
+        "/marry @user — Propose marriage",
+        "/divorce — End marriage",
+        "/adopt @user — Adopt as child",
+        "/disown @user — Remove child",
+        "/disownme — Leave parent",
+        "/friend @user — Friend request",
+        "/removefriend @user — Remove friend",
+        "/brother @user — Brother bond",
+        "/sister @user — Sister bond",
+        "/unbrother @user",
+        "/unsister @user",
+        "/family — Your family",
+        "/tree — Group family tree",
+        "/relations @user",
+        "/profile @user — Profile card",
+        "/setname <text> — Custom name",
+        "/clearname — Reset name",
+        "/setphoto — Reply to image",
+        "/clearphoto — Reset photo",
     ]),
 }
 TOTAL_HELP_PAGES = len(HELP_PAGES)
@@ -1848,6 +2225,102 @@ async def cb_permission(event):
         await client.send_message(event.chat_id, caption)
     await event.answer("Accepted 💖")
 
+@client.on(events.CallbackQuery(data=re.compile(rb"^fam:(\w+):(yes|no):(\d+):(\d+)$")))
+async def cb_family(event):
+    kind = event.pattern_match.group(1).decode()
+    choice = event.pattern_match.group(2).decode()
+    requester_id = int(event.pattern_match.group(3))
+    target_id = int(event.pattern_match.group(4))
+
+    if event.sender_id != target_id:
+        await event.answer("This request isn't for you", alert=True)
+        return
+
+    info_ = pending_family.pop(event.message_id, None)
+    if not info_:
+        await event.answer("This request has expired", alert=True)
+        return
+
+    chat_id = event.chat_id
+    target_user = await client.get_entity(target_id)
+    target_name = getattr(target_user, "first_name", "user")
+    requester_user = await client.get_entity(requester_id)
+    requester_name = getattr(requester_user, "first_name", "user")
+
+    if choice == "no":
+        icons = {"marry": "💔", "adopt": "💔", "friend": "💔", "brother": "💔", "sister": "💔"}
+        await event.edit(
+            f"{icons.get(kind, '💔')}  **Declined**\n\n"
+            f"   {BULLET} {target_name} declined the {kind} request"
+        )
+        await event.answer("Declined")
+        return
+
+    # ACCEPT — save to DB
+    try:
+        if kind == "marry":
+            a, b = _pair(requester_id, target_id)
+            a_name = requester_name if a == requester_id else target_name
+            b_name = target_name if b == target_id else requester_name
+            cur.execute(
+                "INSERT OR REPLACE INTO marriages(chat_id,user1_id,user2_id,user1_name,user2_name,married_at,romance) "
+                "VALUES(?,?,?,?,?,?,0)",
+                (chat_id, a, b, a_name, b_name, time.time())
+            )
+            conn.commit()
+            await event.edit(
+                f"💍  **{requester_name} married {target_name}**\n\n"
+                f"   _A new family begins_"
+            )
+
+        elif kind == "adopt":
+            cur.execute(
+                "INSERT OR REPLACE INTO adoptions(chat_id,parent_id,child_id,parent_name,child_name,adopted_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (chat_id, requester_id, target_id, requester_name, target_name, time.time())
+            )
+            conn.commit()
+            await event.edit(
+                f"👪  **{requester_name} adopted {target_name}**\n\n"
+                f"   _Welcome to the family_"
+            )
+
+        elif kind == "friend":
+            a, b = _pair(requester_id, target_id)
+            a_name = requester_name if a == requester_id else target_name
+            b_name = target_name if b == target_id else requester_name
+            cur.execute(
+                "INSERT OR REPLACE INTO friendships(chat_id,user1_id,user2_id,user1_name,user2_name,friended_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (chat_id, a, b, a_name, b_name, time.time())
+            )
+            conn.commit()
+            await event.edit(
+                f"🤝  **{requester_name} and {target_name} are now friends**"
+            )
+
+        elif kind in ("brother", "sister"):
+            a, b = _pair(requester_id, target_id)
+            a_name = requester_name if a == requester_id else target_name
+            b_name = target_name if b == target_id else requester_name
+            cur.execute(
+                "INSERT OR REPLACE INTO siblingship(chat_id,user1_id,user2_id,user1_name,user2_name,kind,bonded_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (chat_id, a, b, a_name, b_name, kind, time.time())
+            )
+            conn.commit()
+            emoji = "🤜" if kind == "brother" else "🤛"
+            vibe = "Bhaichara strong" if kind == "brother" else "Behen-chara strong"
+            await event.edit(
+                f"{emoji}  **{requester_name} and {target_name} are now {kind}s**\n\n"
+                f"   _{vibe}_"
+            )
+
+        await event.answer("Accepted ✅")
+    except Exception as e:
+        log(f"[family accept failed] {e}")
+        await event.answer(f"Failed: {e}", alert=True)
+
 
 # ═══════════════════════════════════════════════════════════
 # CONSENT COMMANDS — hug / kiss / sex
@@ -2895,6 +3368,566 @@ async def main():
     await send_startup_message()
     await client.run_until_disconnected()
 
+
+if __name__ == "__main__":
+    try:
+        client.loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        print("\n👋 Shutting down cleanly…")
+    finally:
+        try:
+            client.loop.run_until_complete(client.disconnect())
+        except Exception:
+            pass
+
+# ═══════════════════════════════════════════════════════════
+# FAMILY SYSTEM
+# ═══════════════════════════════════════════════════════════
+
+@client.on(events.NewMessage(pattern=r"^/marry(?:@\w+)?(?:\s+(.+))?$"))
+async def cmd_marry(event):
+    uid, name = await resolve_target(event)
+    if not uid:
+        return await event.reply(error("Usage", "`/marry @username` or reply to a message"))
+    await send_family_proposal(event, "marry", uid, name)
+
+
+@client.on(events.NewMessage(pattern=r"^/divorce(?:@\w+)?$"))
+async def cmd_divorce(event):
+    chat_id = event.chat_id
+    sender = await event.get_sender()
+    m = get_marriage(chat_id, sender.id)
+    if not m:
+        return await event.reply(error("You're not married in this group"))
+    other_id = m["user2_id"] if m["user1_id"] == sender.id else m["user1_id"]
+    other_name = m["user2_name"] if m["user1_id"] == sender.id else m["user1_name"]
+    cur.execute(
+        "DELETE FROM marriages WHERE chat_id=? AND user1_id=?",
+        (chat_id, m["user1_id"])
+    )
+    conn.commit()
+    await event.reply(
+        f"💔  **{sender.first_name} and {other_name} divorced**\n\n"
+        f"   _Their paths diverge_"
+    )
+
+@client.on(events.NewMessage(pattern=r"^/adopt(?:@\w+)?(?:\s+(.+))?$"))
+async def cmd_adopt(event):
+    uid, name = await resolve_target(event)
+    if not uid:
+        return await event.reply(error("Usage", "`/adopt @username` or reply to a message"))
+    await send_family_proposal(event, "adopt", uid, name)
+
+
+@client.on(events.NewMessage(pattern=r"^/disown(?:@\w+)?(?:\s+(.+))?$"))
+async def cmd_disown(event):
+    chat_id = event.chat_id
+    sender = await event.get_sender()
+    uid, name = await resolve_target(event)
+    if not uid:
+        return await event.reply(error("Usage", "`/disown @username` or reply to a message"))
+    cur.execute(
+        "SELECT 1 FROM adoptions WHERE chat_id=? AND parent_id=? AND child_id=?",
+        (chat_id, sender.id, uid)
+    )
+    if not cur.fetchone():
+        return await event.reply(error("That user isn't your child"))
+    cur.execute(
+        "DELETE FROM adoptions WHERE chat_id=? AND parent_id=? AND child_id=?",
+        (chat_id, sender.id, uid)
+    )
+    conn.commit()
+    await event.reply(
+        f"👋  **{sender.first_name} disowned {name}**\n\n"
+        f"   _No longer family_"
+    )
+
+
+@client.on(events.NewMessage(pattern=r"^/disownme(?:@\w+)?$"))
+async def cmd_disownme(event):
+    chat_id = event.chat_id
+    sender = await event.get_sender()
+    parent = get_parent(chat_id, sender.id)
+    if not parent:
+        return await event.reply(error("You don't have a parent in this group"))
+    cur.execute(
+        "DELETE FROM adoptions WHERE chat_id=? AND parent_id=? AND child_id=?",
+        (chat_id, parent["parent_id"], sender.id)
+    )
+    conn.commit()
+    await event.reply(
+        f"👋  **{sender.first_name} left {parent['parent_name']}**\n\n"
+        f"   _No longer family_"
+    )
+
+@client.on(events.NewMessage(pattern=r"^/friend(?:@\w+)?(?:\s+(.+))?$"))
+async def cmd_friend(event):
+    uid, name = await resolve_target(event)
+    if not uid:
+        return await event.reply(error("Usage", "`/friend @username` or reply to a message"))
+    await send_family_proposal(event, "friend", uid, name)
+
+
+@client.on(events.NewMessage(pattern=r"^/removefriend(?:@\w+)?(?:\s+(.+))?$"))
+async def cmd_removefriend(event):
+    chat_id = event.chat_id
+    sender = await event.get_sender()
+    uid, name = await resolve_target(event)
+    if not uid:
+        return await event.reply(error("Usage", "`/removefriend @username` or reply to a message"))
+    a, b = _pair(sender.id, uid)
+    cur.execute(
+        "DELETE FROM friendships WHERE chat_id=? AND user1_id=? AND user2_id=?",
+        (chat_id, a, b)
+    )
+    conn.commit()
+    if cur.rowcount:
+        await event.reply(f"💔  **{sender.first_name} removed {name} as a friend**")
+    else:
+        await event.reply(error("You're not friends"))
+
+@client.on(events.NewMessage(pattern=r"^/brother(?:@\w+)?(?:\s+(.+))?$"))
+async def cmd_brother(event):
+    uid, name = await resolve_target(event)
+    if not uid:
+        return await event.reply(error("Usage", "`/brother @username` or reply to a message"))
+    await send_family_proposal(event, "brother", uid, name)
+
+
+@client.on(events.NewMessage(pattern=r"^/sister(?:@\w+)?(?:\s+(.+))?$"))
+async def cmd_sister(event):
+    uid, name = await resolve_target(event)
+    if not uid:
+        return await event.reply(error("Usage", "`/sister @username` or reply to a message"))
+    await send_family_proposal(event, "sister", uid, name)
+
+
+@client.on(events.NewMessage(pattern=r"^/unbrother(?:@\w+)?(?:\s+(.+))?$"))
+async def cmd_unbrother(event):
+    chat_id = event.chat_id
+    sender = await event.get_sender()
+    uid, name = await resolve_target(event)
+    if not uid:
+        return await event.reply(error("Usage", "`/unbrother @username` or reply"))
+    a, b = _pair(sender.id, uid)
+    cur.execute(
+        "DELETE FROM siblingship WHERE chat_id=? AND user1_id=? AND user2_id=? AND kind='brother'",
+        (chat_id, a, b)
+    )
+    conn.commit()
+    if cur.rowcount:
+        await event.reply(f"💔  **{sender.first_name} and {name} are no longer brothers**")
+    else:
+        await event.reply(error("Not brothers"))
+
+
+@client.on(events.NewMessage(pattern=r"^/unsister(?:@\w+)?(?:\s+(.+))?$"))
+async def cmd_unsister(event):
+    chat_id = event.chat_id
+    sender = await event.get_sender()
+    uid, name = await resolve_target(event)
+    if not uid:
+        return await event.reply(error("Usage", "`/unsister @username` or reply"))
+    a, b = _pair(sender.id, uid)
+    cur.execute(
+        "DELETE FROM siblingship WHERE chat_id=? AND user1_id=? AND user2_id=? AND kind='sister'",
+        (chat_id, a, b)
+    )
+    conn.commit()
+    if cur.rowcount:
+        await event.reply(f"💔  **{sender.first_name} and {name} are no longer sisters**")
+    else:
+        await event.reply(error("Not sisters"))
+
+@client.on(events.NewMessage(pattern=r"^/family(?:@\w+)?(?:\s+.*)?$"))
+async def cmd_family(event):
+    chat_id = event.chat_id
+    uid, name = await resolve_target(event)
+    if not uid:
+        sender = await event.get_sender()
+        uid = sender.id
+        name = getattr(sender, "first_name", "you")
+
+    sections = []
+
+    # Spouse
+    m = get_marriage(chat_id, uid)
+    if m:
+        other_id = m["user2_id"] if m["user1_id"] == uid else m["user1_id"]
+        other_name = m["user2_name"] if m["user1_id"] == uid else m["user1_name"]
+        romance = m["romance"] or 0
+        hearts = "❤️" * min(5, romance // 10) + "🤍" * max(0, 5 - romance // 10)
+        sections.append(
+            f"   💍  **Spouse**\n"
+            f"      └─ {mention(other_id, other_name)} · {hearts} ({romance})"
+        )
+
+    # Parent
+    p = get_parent(chat_id, uid)
+    if p:
+        sections.append(
+            f"   👨  **Parent**\n"
+            f"      └─ {mention(p['parent_id'], p['parent_name'])}"
+        )
+
+    # Children
+    kids = get_children(chat_id, uid)
+    if kids:
+        kid_list = ", ".join(mention(k["child_id"], k["child_name"]) for k in kids[:10])
+        extra = f" (+{len(kids)-10} more)" if len(kids) > 10 else ""
+        sections.append(
+            f"   👶  **Children** ({len(kids)})\n"
+            f"      └─ {kid_list}{extra}"
+        )
+
+    # Siblings
+    sibs = get_siblings(chat_id, uid)
+    if sibs:
+        sib_list = ", ".join(mention(s["child_id"], s["child_name"]) for s in sibs[:10])
+        sections.append(
+            f"   👥  **Siblings** ({len(sibs)})\n"
+            f"      └─ {sib_list}"
+        )
+
+    # Friends
+    friends = get_friends(chat_id, uid)
+    if friends:
+        f_list = ", ".join(mention(fid, fname) for fid, fname in friends[:10])
+        extra = f" (+{len(friends)-10} more)" if len(friends) > 10 else ""
+        sections.append(
+            f"   🤝  **Friends** ({len(friends)})\n"
+            f"      └─ {f_list}{extra}"
+        )
+
+    # Brothers
+    bros = get_bonds(chat_id, uid, "brother")
+    if bros:
+        b_list = ", ".join(mention(bid, bname) for bid, bname in bros)
+        sections.append(
+            f"   🤜  **Brothers** ({len(bros)})\n"
+            f"      └─ {b_list}"
+        )
+
+    # Sisters
+    sis = get_bonds(chat_id, uid, "sister")
+    if sis:
+        s_list = ", ".join(mention(sid, sname) for sid, sname in sis)
+        sections.append(
+            f"   🤛  **Sisters** ({len(sis)})\n"
+            f"      └─ {s_list}"
+        )
+
+    if not sections:
+        return await event.reply(
+            f"👪  **{name}'s Family**\n\n"
+            f"   _No family connections yet._\n\n"
+            f"   {BULLET} `/marry @user` — propose\n"
+            f"   {BULLET} `/adopt @user` — adopt\n"
+            f"   {BULLET} `/friend @user` — befriend"
+        )
+
+    body = "\n\n".join(sections)
+    await event.reply(f"👪  **{name}'s Family**\n\n{body}")
+
+
+@client.on(events.NewMessage(pattern=r"^/relations(?:@\w+)?(?:\s+.*)?$"))
+async def cmd_relations(event):
+    chat_id = event.chat_id
+    uid, name = await resolve_target(event)
+    if not uid:
+        sender = await event.get_sender()
+        uid = sender.id
+        name = getattr(sender, "first_name", "you")
+
+    fields = []
+
+    m = get_marriage(chat_id, uid)
+    if m:
+        other_id = m["user2_id"] if m["user1_id"] == uid else m["user1_id"]
+        other_name = m["user2_name"] if m["user1_id"] == uid else m["user1_name"]
+        fields.append(("💍 Spouse", mention(other_id, other_name)))
+    else:
+        fields.append(("💍 Spouse", "—"))
+
+    p = get_parent(chat_id, uid)
+    fields.append(("👨 Parent", mention(p["parent_id"], p["parent_name"]) if p else "—"))
+
+    kids = get_children(chat_id, uid)
+    kid_text = ", ".join(mention(k["child_id"], k["child_name"]) for k in kids[:5]) if kids else "—"
+    if len(kids) > 5:
+        kid_text += f" (+{len(kids)-5})"
+    fields.append((f"👶 Children ({len(kids)})", kid_text))
+
+    sibs = get_siblings(chat_id, uid)
+    sib_text = ", ".join(mention(s["child_id"], s["child_name"]) for s in sibs[:5]) if sibs else "—"
+    fields.append((f"👥 Siblings ({len(sibs)})", sib_text))
+
+    friends = get_friends(chat_id, uid)
+    friend_text = ", ".join(mention(fid, fname) for fid, fname in friends[:5]) if friends else "—"
+    if len(friends) > 5:
+        friend_text += f" (+{len(friends)-5})"
+    fields.append((f"🤝 Friends ({len(friends)})", friend_text))
+
+    bros = get_bonds(chat_id, uid, "brother")
+    fields.append((f"🤜 Brothers ({len(bros)})",
+                   ", ".join(mention(b, n) for b, n in bros[:5]) if bros else "—"))
+
+    sis = get_bonds(chat_id, uid, "sister")
+    fields.append((f"🤛 Sisters ({len(sis)})",
+                   ", ".join(mention(s, n) for s, n in sis[:5]) if sis else "—"))
+
+    total = len(kids) + len(sibs) + len(friends) + len(bros) + len(sis) + (1 if m else 0) + (1 if p else 0)
+    fields.append(("👪 Total", str(total)))
+
+    body = "\n\n".join(f"   {BULLET} {k}: {v}" for k, v in fields)
+    await event.reply(f"🔗  **{name}'s Relations**\n\n{body}")
+
+
+@client.on(events.NewMessage(pattern=r"^/tree(?:@\w+)?$"))
+async def cmd_tree(event):
+    chat_id = event.chat_id
+    cur.execute("SELECT * FROM marriages WHERE chat_id=?", (chat_id,))
+    marriages = cur.fetchall()
+    if not marriages:
+        return await event.reply(
+            "🌳  **Group Family Tree**\n\n"
+            "   _No families in this group yet._\n\n"
+            "   Start with `/marry @user`"
+        )
+
+    lines = []
+    for m in marriages[:10]:
+        u1 = mention(m["user1_id"], m["user1_name"])
+        u2 = mention(m["user2_id"], m["user2_name"])
+        lines.append(f"   💍 **{u1}** ⚭ **{u2}**")
+
+        # Direct children of either spouse
+        cur.execute(
+            "SELECT child_id, child_name FROM adoptions WHERE chat_id=? AND parent_id IN (?,?)",
+            (chat_id, m["user1_id"], m["user2_id"])
+        )
+        kids = cur.fetchall()
+        for k in kids[:5]:
+            lines.append(f"      👶 {mention(k['child_id'], k['child_name'])}")
+        if len(kids) > 5:
+            lines.append(f"      ... +{len(kids)-5} more")
+        lines.append("")
+
+    if len(marriages) > 10:
+        lines.append(f"   _... and {len(marriages)-10} more families_")
+
+    await event.reply("🌳  **Group Family Tree**\n\n" + "\n".join(lines))
+
+
+@client.on(events.NewMessage(pattern=r"^/profile(?:@\w+)?(?:\s+.*)?$"))
+async def cmd_profile(event):
+    chat_id = event.chat_id
+    uid, default_name = await resolve_target(event)
+    if not uid:
+        sender = await event.get_sender()
+        uid = sender.id
+        default_name = getattr(sender, "first_name", "you")
+
+    # Custom name/photo
+    prof = get_profile(chat_id, uid)
+    display_name = prof["custom_name"] if (prof and prof["custom_name"]) else default_name
+    photo_ref = prof["photo_ref"] if prof else None
+
+    # Streak
+    streak_row = get_streak(chat_id, uid)
+    streak_current = streak_row["current"] if streak_row else 0
+    streak_longest = streak_row["longest"] if streak_row else 0
+    rank = get_streak_rank(chat_id, uid)
+
+    # Warns
+    cur.execute("SELECT count FROM warnings WHERE chat_id=? AND user_id=?", (chat_id, uid))
+    warn_row = cur.fetchone()
+    warn_count = warn_row["count"] if warn_row else 0
+    warn_lim = warn_limit(chat_id)
+
+    # Marriage
+    m = get_marriage(chat_id, uid)
+    spouse_text = "—"
+    if m:
+        other_id = m["user2_id"] if m["user1_id"] == uid else m["user1_id"]
+        other_name = m["user2_name"] if m["user1_id"] == uid else m["user1_name"]
+        # Use custom name if spouse has one
+        other_prof = get_profile(chat_id, other_id)
+        if other_prof and other_prof["custom_name"]:
+            other_name = other_prof["custom_name"]
+        spouse_text = mention(other_id, other_name)
+
+    # Parent
+    p = get_parent(chat_id, uid)
+    parent_text = "—"
+    if p:
+        pname = p["parent_name"]
+        pprof = get_profile(chat_id, p["parent_id"])
+        if pprof and pprof["custom_name"]:
+            pname = pprof["custom_name"]
+        parent_text = mention(p["parent_id"], pname)
+
+    # Children
+    kids = get_children(chat_id, uid)
+    kids_text = str(len(kids)) if kids else "0"
+
+    # Friends
+    friends = get_friends(chat_id, uid)
+    friend_count = len(friends)
+
+    # Waifu today
+    cur.execute(
+        "SELECT waifu_id, waifu_name FROM waifu_daily WHERE chat_id=? AND user_id=?",
+        (chat_id, uid)
+    )
+    wrow = cur.fetchone()
+    waifu_text = "—"
+    if wrow:
+        wname = wrow["waifu_name"]
+        wprof = get_profile(chat_id, wrow["waifu_id"])
+        if wprof and wprof["custom_name"]:
+            wname = wprof["custom_name"]
+        waifu_text = mention(wrow["waifu_id"], wname)
+
+    # Couple today
+    cur.execute(
+        "SELECT user1_id, user1_name, user2_id, user2_name FROM couple_daily WHERE chat_id=?",
+        (chat_id,)
+    )
+    crow = cur.fetchone()
+    couple_text = "—"
+    if crow and uid in (crow["user1_id"], crow["user2_id"]):
+        other_id = crow["user2_id"] if crow["user1_id"] == uid else crow["user1_id"]
+        other_name = crow["user2_name"] if crow["user1_id"] == uid else crow["user1_name"]
+        cprof = get_profile(chat_id, other_id)
+        if cprof and cprof["custom_name"]:
+            other_name = cprof["custom_name"]
+        couple_text = mention(other_id, other_name)
+
+    fields = [
+        (None, f"👤 **{display_name}**"),
+        ("Chat ID", f"`{uid}`"),
+        ("Rank", f"#{rank}" if rank else "—"),
+        ("Streak", f"🔥 {streak_current} days (best: {streak_longest})"),
+        ("Warnings", f"⚠️ {warn_count} / {warn_lim}"),
+        ("Married to", f"💍 {spouse_text}"),
+        ("Parent", f"👨 {parent_text}"),
+        ("Children", f"👶 {kids_text}"),
+        ("Friends", f"🤝 {friend_count}"),
+        ("Waifu today", f"💖 {waifu_text}"),
+        ("Couple today", f"🎀 {couple_text}"),
+    ]
+
+    body = "\n\n".join(
+        f"   {BULLET} {k}: {v}" if k else f"   {v}"
+        for k, v in fields
+    )
+
+    card = f"👤  **Profile**\n\n{body}"
+
+    # If custom photo, send it first
+    if photo_ref and photo_ref.startswith("msg:"):
+        try:
+            _, src_chat, src_id = photo_ref.split(":")
+            src_msg = await client.get_messages(int(src_chat), ids=int(src_id))
+            if src_msg and src_msg.media:
+                await client.send_file(chat_id, src_msg.media, caption="")
+        except Exception as e:
+            log(f"[profile photo failed] {e}")
+
+    await event.reply(card)
+
+@client.on(events.NewMessage(pattern=r"^/setname(?:@\w+)?\s+(.+)$"))
+async def cmd_setname(event):
+    chat_id = event.chat_id
+    sender = await event.get_sender()
+    name = event.pattern_match.group(1).strip()
+
+    if not name:
+        return await event.reply(error("Usage", "`/setname <your custom name>`"))
+
+    if len(name) > 40:
+        return await event.reply(error("Too long", "Max 40 characters"))
+
+    if name_taken(chat_id, name, exclude_user_id=sender.id):
+        return await event.reply(error("Name taken", "Someone else already uses that name"))
+
+    cur.execute(
+        "INSERT OR REPLACE INTO user_profiles(chat_id,user_id,custom_name,photo_ref,updated_at) "
+        "VALUES(?,?,?,COALESCE((SELECT photo_ref FROM user_profiles WHERE chat_id=? AND user_id=?), NULL),?)",
+        (chat_id, sender.id, name, chat_id, sender.id, time.time())
+    )
+    conn.commit()
+
+    await event.reply(
+        f"✅  **Custom name set**\n\n"
+        f"   {BULLET} {name}"
+    )
+
+
+@client.on(events.NewMessage(pattern=r"^/clearname(?:@\w+)?(?:\s+.*)?$"))
+async def cmd_clearname(event):
+    chat_id = event.chat_id
+    sender = await event.get_sender()
+    target_id = sender.id
+
+    # Admin can clear others
+    if event.pattern_match and event.pattern_match.group(1):
+        if await is_admin(chat_id, sender.id):
+            uid, _ = await resolve_target(event)
+            if uid:
+                target_id = uid
+
+    cur.execute(
+        "UPDATE user_profiles SET custom_name=NULL WHERE chat_id=? AND user_id=?",
+        (chat_id, target_id)
+    )
+    conn.commit()
+    await event.reply("✅  Custom name removed")
+
+
+@client.on(events.NewMessage(pattern=r"^/setphoto(?:@\w+)?$"))
+async def cmd_setphoto(event):
+    chat_id = event.chat_id
+    sender = await event.get_sender()
+
+    if not event.is_reply:
+        return await event.reply(error("Usage", "Reply to a photo/GIF/video with `/setphoto`"))
+
+    msg = await event.get_reply_message()
+    if not msg or not msg.media:
+        return await event.reply(error("No media", "Reply to a photo, GIF, or video"))
+
+    # Store as msg:<chat>:<id>
+    ref = f"msg:{chat_id}:{msg.id}"
+
+    cur.execute(
+        "INSERT OR REPLACE INTO user_profiles(chat_id,user_id,custom_name,photo_ref,updated_at) "
+        "VALUES(?,?,COALESCE((SELECT custom_name FROM user_profiles WHERE chat_id=? AND user_id=?), NULL),?,?)",
+        (chat_id, sender.id, chat_id, sender.id, ref, time.time())
+    )
+    conn.commit()
+
+    await event.reply("✅  **Profile photo set**")
+
+
+@client.on(events.NewMessage(pattern=r"^/clearphoto(?:@\w+)?(?:\s+.*)?$"))
+async def cmd_clearphoto(event):
+    chat_id = event.chat_id
+    sender = await event.get_sender()
+    target_id = sender.id
+
+    if await is_admin(chat_id, sender.id):
+        uid, _ = await resolve_target(event)
+        if uid:
+            target_id = uid
+
+    cur.execute(
+        "UPDATE user_profiles SET photo_ref=NULL WHERE chat_id=? AND user_id=?",
+        (chat_id, target_id)
+    )
+    conn.commit()
+    await event.reply("✅  Profile photo removed")
 
 if __name__ == "__main__":
     try:
